@@ -141,6 +141,21 @@ export function createFitbetBot(deps: CreateBotDeps) {
         return;
       }
 
+      const active = deps.db
+        .select()
+        .from(participants)
+        .where(
+          and(
+            eq(participants.userId, ctx.from!.id),
+            inArray(participants.status, ["pending_payment", "payment_marked", "active"])
+          )
+        )
+        .get();
+      if (active) {
+        await ctx.reply("У вас уже есть активное участие. Напишите /status для подробностей.");
+        return;
+      }
+
       await ctx.reply("Привет! Добавьте меня в групповой чат и создайте челлендж через /create.");
       return;
     }
@@ -251,6 +266,29 @@ export function createFitbetBot(deps: CreateBotDeps) {
       await ctx.reply("Команда /create доступна только в группе.");
       return;
     }
+    const current = deps.db
+      .select()
+      .from(challenges)
+      .where(and(eq(challenges.chatId, ctx.chat.id), inArray(challenges.status, ["draft", "pending_payments", "active"])))
+      .get();
+    if (current) {
+      const thresholdPct = Math.round(current.disciplineThreshold * 100);
+      const total = deps.db
+        .select({ c: count() })
+        .from(participants)
+        .where(eq(participants.challengeId, current.id))
+        .get()?.c ?? 0;
+      const joinable = current.status === "draft" || current.status === "pending_payments";
+      const kb = joinable
+        ? new InlineKeyboard().text(`🙋 Участвовать (${total})`, `join_${current.id}`)
+        : undefined;
+      await ctx.reply(
+        `Текущий челлендж:\nДлительность: ${current.durationMonths}\nСтавка: ${current.stakeAmount} ₽\nПорог дисциплины: ${thresholdPct}%\nМакс. пропусков: ${current.maxSkips}\nСтатус: ${current.status}`,
+        kb ? { reply_markup: kb } : undefined
+      );
+      return;
+    }
+
     await ctx.conversation.enter("createChallenge");
   });
 
@@ -274,12 +312,45 @@ export function createFitbetBot(deps: CreateBotDeps) {
       return;
     }
 
+    const blocking = deps.db
+      .select({
+        challengeId: participants.challengeId,
+        participantStatus: participants.status,
+        chatTitle: challenges.chatTitle
+      })
+      .from(participants)
+      .innerJoin(challenges, eq(participants.challengeId, challenges.id))
+      .where(
+        and(
+          eq(participants.userId, from.id),
+          inArray(participants.status, ["onboarding", "pending_payment", "payment_marked", "active"]),
+          inArray(challenges.status, ["draft", "pending_payments", "active"])
+        )
+      )
+      .get();
+    if (blocking && blocking.challengeId !== challengeId) {
+      await ctx.answerCallbackQuery({
+        text: `Вы уже участвуете в челлендже в группе «${blocking.chatTitle}» (статус: ${blocking.participantStatus}).`,
+        show_alert: true
+      });
+      return;
+    }
+
     const existing = deps.db
       .select()
       .from(participants)
       .where(and(eq(participants.challengeId, challengeId), eq(participants.userId, from.id)))
       .get();
 
+    if (existing && existing.status === "onboarding") {
+      await ctx.answerCallbackQuery({ text: "Онбординг уже начат. Напишите /start в личку.", show_alert: true });
+      try {
+        await ctx.api.sendMessage(from.id, "Напишите /start, чтобы продолжить онбординг.");
+      } catch {
+        // ignore
+      }
+      return;
+    }
     if (existing && existing.status !== "dropped") {
       await ctx.answerCallbackQuery({ text: "Вы уже участвуете.", show_alert: true });
       return;
