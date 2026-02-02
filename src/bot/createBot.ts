@@ -29,6 +29,7 @@ import { seedCommitmentTemplates } from "../db/seeds.js";
 import { finalizeBankHolderElection } from "../services/bankholderElection.js";
 import { createOpenRouterClient, type OpenRouterClient } from "../services/openRouter.js";
 import { captureException } from "../monitoring/sentry.js";
+import { formatChallengeDuration } from "./duration.js";
 
 type CreateBotDeps = {
   token: string;
@@ -249,10 +250,10 @@ export function createFitbetBot(deps: CreateBotDeps) {
       .map((p) => {
         const name = p.username ? `@${p.username}` : p.firstName ?? String(p.userId);
         return `${name} — ${p.status} (чек-ины ${p.completedCheckins}/${p.totalCheckins}, пропуски ${p.skippedCheckins})`;
-      });
+    });
 
     const thresholdPct = Math.round(current.disciplineThreshold * 100);
-    const header = `*Челлендж в этом чате*\nСтатус: *${current.status}*\nДлительность: *${current.durationMonths}*\nСтавка: *${current.stakeAmount} ₽*\nПорог дисциплины: *${thresholdPct}%*\nМакс. пропусков: *${current.maxSkips}*`;
+    const header = `*Челлендж в этом чате*\nСтатус: *${current.status}*\nДлительность: *${formatChallengeDuration(current.durationMonths, deps.env.CHALLENGE_DURATION_UNIT)}*\nСтавка: *${current.stakeAmount} ₽*\nПорог дисциплины: *${thresholdPct}%*\nМакс. пропусков: *${current.maxSkips}*`;
     const bank = current.bankHolderUsername
       ? `\nBank Holder: @${current.bankHolderUsername}`
       : current.bankHolderId
@@ -284,7 +285,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
         ? new InlineKeyboard().text(`🙋 Участвовать (${total})`, `join_${current.id}`)
         : undefined;
       await ctx.reply(
-        `Текущий челлендж:\nДлительность: ${current.durationMonths}\nСтавка: ${current.stakeAmount} ₽\nПорог дисциплины: ${thresholdPct}%\nМакс. пропусков: ${current.maxSkips}\nСтатус: ${current.status}`,
+        `Текущий челлендж:\nДлительность: ${formatChallengeDuration(current.durationMonths, deps.env.CHALLENGE_DURATION_UNIT)}\nСтавка: ${current.stakeAmount} ₽\nПорог дисциплины: ${thresholdPct}%\nМакс. пропусков: ${current.maxSkips}\nСтатус: ${current.status}`,
         kb ? { reply_markup: kb } : undefined
       );
       return;
@@ -860,9 +861,12 @@ async function maybeActivateChallenge(
   if (blocking > 0) return;
 
   const startedAt = ts;
-  const endsAt = deps.env.CHALLENGE_DURATION_UNIT === "hours"
-    ? startedAt + challenge.durationMonths * 60 * 60 * 1000
-    : addMonthsMs(startedAt, challenge.durationMonths);
+  const endsAt =
+    deps.env.CHALLENGE_DURATION_UNIT === "hours"
+      ? startedAt + challenge.durationMonths * 60 * 60 * 1000
+      : deps.env.CHALLENGE_DURATION_UNIT === "days"
+        ? startedAt + challenge.durationMonths * 24 * 60 * 60 * 1000
+        : addMonthsMs(startedAt, challenge.durationMonths);
 
   deps.db
     .update(challenges)

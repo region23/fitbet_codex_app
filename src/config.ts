@@ -10,7 +10,7 @@ const envSchema = z.object({
     .string()
     .transform((v) => (v ? Number(v) : undefined))
     .pipe(z.number().int().positive().optional()),
-  CHALLENGE_DURATION_UNIT: z.enum(["months", "hours"]).default("months"),
+  CHALLENGE_DURATION_UNIT: z.enum(["months", "days", "hours"]).default("months"),
   CHECKIN_PERIOD_DAYS: z
     .string()
     .transform((v) => Number(v))

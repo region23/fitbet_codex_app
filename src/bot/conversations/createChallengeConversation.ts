@@ -5,6 +5,11 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { challenges } from "../../db/schema.js";
 import type { AppEnv } from "../../config.js";
 import type { BotContext } from "../context.js";
+import {
+  formatChallengeDuration,
+  formatChallengeDurationUnit,
+  type ChallengeDurationUnit
+} from "../duration.js";
 
 type Deps = {
   db: BetterSQLite3Database;
@@ -33,7 +38,7 @@ export async function createChallengeConversation(
     .text("12", "create_duration_12");
 
   await ctx.reply(
-    `Выберите длительность (${deps.env.CHALLENGE_DURATION_UNIT === "hours" ? "часов" : "месяцев"}):`,
+    `Выберите длительность (${formatChallengeDurationUnit(deps.env.CHALLENGE_DURATION_UNIT)}):`,
     { reply_markup: durationKeyboard }
   );
 
@@ -95,10 +100,19 @@ export async function createChallengeConversation(
 
   const joinKeyboard = new InlineKeyboard().text("🙋 Участвовать (0)", `join_${created.id}`);
 
-  await skipsCtx.reply(formatChallengeCreatedMessage(duration, stake, disciplineThreshold, maxSkips), {
-    parse_mode: "Markdown",
-    reply_markup: joinKeyboard
-  });
+  await skipsCtx.reply(
+    formatChallengeCreatedMessage(
+      duration,
+      deps.env.CHALLENGE_DURATION_UNIT,
+      stake,
+      disciplineThreshold,
+      maxSkips
+    ),
+    {
+      parse_mode: "Markdown",
+      reply_markup: joinKeyboard
+    }
+  );
 }
 
 async function readPositiveFloat(
@@ -117,13 +131,14 @@ async function readPositiveFloat(
 
 function formatChallengeCreatedMessage(
   duration: number,
+  durationUnit: ChallengeDurationUnit,
   stake: number,
   disciplineThreshold: number,
   maxSkips: number
 ) {
   const thresholdPct = Math.round(disciplineThreshold * 100);
   return `*Челлендж создан (черновик)*
-Длительность: *${duration}*
+Длительность: *${formatChallengeDuration(duration, durationUnit)}*
 Ставка: *${stake} ₽*
 Порог дисциплины: *${thresholdPct}%*
 Макс. пропусков: *${maxSkips}*`;
