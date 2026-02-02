@@ -6,8 +6,11 @@ import { createFitbetBot } from "./createBot.js";
 import type { AppEnv } from "../config.js";
 import type { ApiClientOptions } from "grammy";
 import type { BotContext } from "./context.js";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 export type ApiCall = { method: string; payload: unknown };
+export type SavedPhoto = { source: string; destinationPath: string };
 
 export function createTestBot(opts?: {
   env?: Partial<AppEnv>;
@@ -17,9 +20,11 @@ export function createTestBot(opts?: {
   db: BetterSQLite3Database;
   sqlite: Database.Database;
   apiCalls: ApiCall[];
+  savedPhotos: SavedPhoto[];
   close: () => void;
 } {
   const apiCalls: ApiCall[] = [];
+  const savedPhotos: SavedPhoto[] = [];
   const env: AppEnv = {
     BOT_TOKEN: "test",
     DATABASE_URL: ":memory:",
@@ -50,6 +55,13 @@ export function createTestBot(opts?: {
     },
     client: {
       fetch: createApiFetchStub(apiCalls)
+    },
+    files: {
+      async downloadToFile(url, destinationPath) {
+        savedPhotos.push({ source: url, destinationPath });
+        await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+        await fs.writeFile(destinationPath, "test");
+      }
     }
   });
 
@@ -58,6 +70,7 @@ export function createTestBot(opts?: {
     db: appDb.db,
     sqlite: appDb.sqlite,
     apiCalls,
+    savedPhotos,
     close: appDb.close
   };
 }
@@ -101,6 +114,16 @@ function fakeApiResponse(method: string, payload: any) {
             typeof payload.chat_id === "number" && payload.chat_id < 0 ? "group" : "private"
         },
         text: payload.text
+      }
+    };
+  }
+  if (method === "getFile") {
+    return {
+      ok: true,
+      result: {
+        file_id: payload.file_id,
+        file_unique_id: `${payload.file_id}_u`,
+        file_path: `photos/${payload.file_id}.jpg`
       }
     };
   }

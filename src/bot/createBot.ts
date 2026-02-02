@@ -11,6 +11,8 @@ import { challenges, participants } from "../db/schema.js";
 import { and, count, eq, inArray } from "drizzle-orm";
 import type { UserFromGetMe } from "grammy/types";
 import type { ApiClientOptions } from "grammy";
+import { onboardingConversation } from "./conversations/onboardingConversation.js";
+import { createTelegramFileStore, type FileStore } from "../services/fileStore.js";
 
 type CreateBotDeps = {
   token: string;
@@ -20,6 +22,7 @@ type CreateBotDeps = {
   now?: () => number;
   botInfo?: UserFromGetMe;
   client?: ApiClientOptions;
+  files?: FileStore;
 };
 
 export function createFitbetBot(deps: CreateBotDeps) {
@@ -28,6 +31,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
     client: deps.client
   });
   const now = deps.now ?? (() => Date.now());
+  const files = deps.files ?? createTelegramFileStore();
 
   if (deps.env.NODE_ENV !== "test") {
     bot.use(async (ctx, next) => {
@@ -62,15 +66,34 @@ export function createFitbetBot(deps: CreateBotDeps) {
       "createChallenge"
     )
   );
+  bot.use(
+    createConversation(
+      (conversation, ctx, participantId) =>
+        onboardingConversation(conversation, ctx, Number(participantId), {
+          db: deps.db,
+          env: deps.env,
+          now,
+          files
+        }),
+      "onboarding"
+    )
+  );
 
   bot.command("help", (ctx) => ctx.reply(helpText, { parse_mode: "Markdown" }));
 
   bot.command("start", async (ctx) => {
     if (ctx.chat?.type === "private") {
-      await ctx.reply(
-        "Привет! Добавьте меня в групповой чат и создайте челлендж через /create.",
-        { parse_mode: "Markdown" }
-      );
+      const participant = deps.db
+        .select()
+        .from(participants)
+        .where(and(eq(participants.userId, ctx.from!.id), eq(participants.status, "onboarding")))
+        .get();
+      if (participant) {
+        await ctx.conversation.enter("onboarding", participant.id);
+        return;
+      }
+
+      await ctx.reply("Привет! Добавьте меня в групповой чат и создайте челлендж через /create.");
       return;
     }
     await ctx.reply("Бот активирован. Используйте /create чтобы создать челлендж.");
@@ -186,6 +209,15 @@ export function createFitbetBot(deps: CreateBotDeps) {
     }
 
     await ctx.answerCallbackQuery({ text: "Вы записаны! Напишите боту /start в личку." });
+
+    try {
+      await ctx.api.sendMessage(
+        from.id,
+        `Вы присоединились к челленджу в группе «${challenge.chatTitle}».\n\nНапишите /start, чтобы начать онбординг.`
+      );
+    } catch {
+      // Пользователь мог не начать диалог с ботом
+    }
   });
 
   bot.command("bankholder", async (ctx) => {
