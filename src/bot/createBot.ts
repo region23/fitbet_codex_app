@@ -27,6 +27,7 @@ import { checkinWindows } from "../db/schema.js";
 import { seedCommitmentTemplates } from "../db/seeds.js";
 import { finalizeBankHolderElection } from "../services/bankholderElection.js";
 import { createOpenRouterClient, type OpenRouterClient } from "../services/openRouter.js";
+import { captureException } from "../monitoring/sentry.js";
 
 type CreateBotDeps = {
   token: string;
@@ -738,8 +739,20 @@ export function createFitbetBot(deps: CreateBotDeps) {
     await ctx.reply("База данных очищена ✅");
   });
 
-  bot.catch((err) => {
+  bot.catch(async (err) => {
     console.error("[bot error]", err.error);
+    captureException(err.error, {
+      update_id: err.ctx.update.update_id,
+      chat_id: err.ctx.chat?.id,
+      from_id: err.ctx.from?.id
+    });
+    try {
+      if (err.ctx.chat) {
+        await err.ctx.reply("Произошла ошибка. Попробуйте ещё раз позже.");
+      }
+    } catch {
+      // ignore
+    }
   });
 
   return bot;

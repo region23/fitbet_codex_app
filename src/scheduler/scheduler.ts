@@ -10,6 +10,7 @@ import {
   openCheckinWindows,
   sendCheckinReminders
 } from "./tasks.js";
+import { captureException } from "../monitoring/sentry.js";
 
 type Deps = {
   env: AppEnv;
@@ -30,6 +31,7 @@ export function startScheduler(deps: Deps) {
       await finalizeEndedChallenges({ db: deps.db, api: deps.api, now });
     } catch (e) {
       console.error("[scheduler] error", e);
+      captureException(e, { area: "scheduler" });
     }
   };
 

@@ -3,8 +3,10 @@ import { getEnv } from "./config.js";
 import { createAppDb } from "./db/client.js";
 import { createFitbetBot } from "./bot/createBot.js";
 import { startScheduler } from "./scheduler/scheduler.js";
+import { initSentry } from "./monitoring/sentry.js";
 
 const env = getEnv();
+await initSentry(env);
 
 if (!env.BOT_TOKEN) {
   throw new Error("BOT_TOKEN не задан. Укажите BOT_TOKEN в окружении.");
