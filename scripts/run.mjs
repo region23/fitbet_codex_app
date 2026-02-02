@@ -8,11 +8,15 @@ if (!existingNodeOptions.includes(extraNodeOption)) {
   process.env.NODE_OPTIONS = `${existingNodeOptions} ${extraNodeOption}`.trim();
 }
 
-const args = process.argv.slice(2);
-const child = spawn(process.execPath, ["node_modules/vitest/vitest.mjs", ...args], {
-  stdio: "inherit",
-  env: process.env
-});
+const [entry, ...args] = process.argv.slice(2);
+
+if (!entry) {
+  // eslint-disable-next-line no-console
+  console.error("Usage: node scripts/run.mjs <entry> [...args]");
+  process.exit(2);
+}
+
+const child = spawn(process.execPath, [entry, ...args], { stdio: "inherit", env: process.env });
 
 child.on("close", (code, signal) => {
   if (signal) {
@@ -21,3 +25,4 @@ child.on("close", (code, signal) => {
   }
   process.exit(code ?? 1);
 });
+

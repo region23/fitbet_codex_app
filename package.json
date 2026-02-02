@@ -7,11 +7,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "node scripts/run.mjs node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "start": "node scripts/run.mjs dist/index.js",
     "build": "tsc -p tsconfig.json",
-    "test": "node scripts/vitest.mjs run",
-    "test:watch": "node scripts/vitest.mjs",
+    "test": "node scripts/run.mjs node_modules/vitest/vitest.mjs run",
+    "test:watch": "node scripts/run.mjs node_modules/vitest/vitest.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
