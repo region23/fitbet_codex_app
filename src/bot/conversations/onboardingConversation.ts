@@ -1,11 +1,12 @@
 import type { Conversation } from "@grammyjs/conversations";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { InlineKeyboard, type Context } from "grammy";
 import path from "node:path";
 import { photosDirectory } from "../../constants.js";
 import {
   bankHolderElections,
+  challenges,
   commitmentTemplates,
   goals,
   participantCommitments,
@@ -281,7 +282,12 @@ export async function onboardingConversation(
       deps.db
         .select()
         .from(participants)
-        .where(and(eq(participants.challengeId, initialParticipant.challengeId), eq(participants.status, "pending_payment")))
+        .where(
+          and(
+            eq(participants.challengeId, initialParticipant.challengeId),
+            inArray(participants.status, ["pending_payment", "payment_marked", "active"])
+          )
+        )
         .all()
     );
     if (eligible.length >= 2) {
@@ -294,8 +300,22 @@ export async function onboardingConversation(
     }
   }
 
-  const payKb = new InlineKeyboard().text("💳 Я оплатил", `paid_${participantId}`);
-  await ctx.reply("Онбординг завершён! После оплаты нажмите кнопку:", { reply_markup: payKb });
+  const challenge = await conversation.external(() =>
+    deps.db.select().from(challenges).where(eq(challenges.id, initialParticipant.challengeId)).get()
+  );
+
+  const canPay =
+    challenge != null &&
+    challenge.bankHolderId != null &&
+    ["pending_payments", "active"].includes(challenge.status);
+  if (canPay) {
+    const payKb = new InlineKeyboard().text("💳 Я оплатил", `paid_${participantId}`);
+    await ctx.reply("Онбординг завершён! После оплаты нажмите кнопку:", { reply_markup: payKb });
+  } else {
+    await ctx.reply(
+      "Онбординг завершён! Дождитесь выбора Bank Holder в группе — после этого я пришлю кнопку «💳 Я оплатил»."
+    );
+  }
 }
 
 async function askTrack(

@@ -470,19 +470,38 @@ export function createFitbetBot(deps: CreateBotDeps) {
     const from = ctx.from;
     if (!from) return;
 
+    const hidePayButton = async () => {
+      try {
+        await ctx.editMessageReplyMarkup();
+      } catch {
+        // ignore
+      }
+    };
+
     const participant = deps.db.select().from(participants).where(eq(participants.id, participantId)).get();
     if (!participant || participant.userId !== from.id) {
       await ctx.answerCallbackQuery({ text: "Нет доступа.", show_alert: true });
+      await hidePayButton();
       return;
     }
     if (participant.status !== "pending_payment") {
       await ctx.answerCallbackQuery({ text: "Оплата уже отмечена или подтверждена.", show_alert: true });
+      await hidePayButton();
       return;
     }
 
     const challenge = deps.db.select().from(challenges).where(eq(challenges.id, participant.challengeId)).get();
     if (!challenge) {
       await ctx.answerCallbackQuery({ text: "Челлендж не найден.", show_alert: true });
+      await hidePayButton();
+      return;
+    }
+    if (!challenge.bankHolderId || !["pending_payments", "active"].includes(challenge.status)) {
+      await ctx.answerCallbackQuery({
+        text: "Bank Holder ещё не выбран. Дождитесь завершения голосования в группе.",
+        show_alert: true
+      });
+      await hidePayButton();
       return;
     }
 
@@ -506,6 +525,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
         .run();
       deps.db.update(participants).set({ status: "active" }).where(eq(participants.id, participantId)).run();
       await ctx.answerCallbackQuery({ text: "Оплата подтверждена (вы Bank Holder)." });
+      await hidePayButton();
       await ctx.reply("Оплата подтверждена ✅");
       await maybeActivateChallenge(deps, ctx.api, challenge.id, ts);
       return;
@@ -522,6 +542,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
     deps.db.update(participants).set({ status: "payment_marked" }).where(eq(participants.id, participantId)).run();
 
     await ctx.answerCallbackQuery({ text: "Отлично! Ждём подтверждение от Bank Holder." });
+    await hidePayButton();
 
     if (challenge.bankHolderId) {
       const who = participant.username ? `@${participant.username}` : participant.firstName ?? `id ${participant.userId}`;

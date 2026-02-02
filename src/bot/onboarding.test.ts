@@ -197,6 +197,183 @@ describe("onboarding", () => {
         .map((c) => (c.payload as any).text)
         .join("\n");
       expect(doneMsg).toContain("Онбординг завершён");
+
+      const hasPayButton = apiCalls.some((c) => {
+        if (c.method !== "sendMessage") return false;
+        const kb = (c.payload as any).reply_markup?.inline_keyboard;
+        if (!Array.isArray(kb)) return false;
+        return kb.flat().some((b: any) => typeof b?.callback_data === "string" && b.callback_data.startsWith("paid_"));
+      });
+      expect(hasPayButton).toBe(false);
+    } finally {
+      close();
+    }
+  });
+
+  it("sends pay button after onboarding when bank holder already chosen", async () => {
+    const { bot, db, apiCalls, close } = createTestBot({
+      now: () => 1_700_000_000_000
+    });
+    try {
+      const challengeId = db
+        .insert(challenges)
+        .values({
+          chatId: -100,
+          chatTitle: "Test Chat",
+          creatorId: 1,
+          durationMonths: 6,
+          stakeAmount: 1000,
+          disciplineThreshold: 0.8,
+          maxSkips: 2,
+          bankHolderId: 20,
+          bankHolderUsername: "bank",
+          status: "pending_payments",
+          createdAt: 1_700_000_000_000
+        })
+        .returning({ id: challenges.id })
+        .get().id;
+
+      const participantId = db
+        .insert(participants)
+        .values({
+          challengeId,
+          userId: 10,
+          firstName: "U",
+          status: "onboarding",
+          joinedAt: 1_700_000_000_000
+        })
+        .returning({ id: participants.id })
+        .get().id;
+
+      await bot.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: 1,
+          chat: { id: 10, type: "private", first_name: "U" },
+          from: { id: 10, is_bot: false, first_name: "U" },
+          text: "/start",
+          entities: [{ offset: 0, length: 6, type: "bot_command" }]
+        }
+      });
+      await bot.handleUpdate({
+        update_id: 2,
+        callback_query: {
+          id: "cb_track",
+          from: { id: 10, is_bot: false, first_name: "U" },
+          chat_instance: "ci",
+          message: {
+            message_id: 2,
+            date: 1,
+            chat: { id: 10, type: "private", first_name: "U" },
+            text: "dummy"
+          },
+          data: "onb_track_cut"
+        }
+      });
+      await bot.handleUpdate({
+        update_id: 3,
+        message: {
+          message_id: 3,
+          date: 1,
+          chat: { id: 10, type: "private", first_name: "U" },
+          from: { id: 10, is_bot: false, first_name: "U" },
+          text: "80"
+        }
+      });
+      await bot.handleUpdate({
+        update_id: 4,
+        message: {
+          message_id: 4,
+          date: 1,
+          chat: { id: 10, type: "private", first_name: "U" },
+          from: { id: 10, is_bot: false, first_name: "U" },
+          text: "90"
+        }
+      });
+      await bot.handleUpdate({
+        update_id: 5,
+        message: {
+          message_id: 5,
+          date: 1,
+          chat: { id: 10, type: "private", first_name: "U" },
+          from: { id: 10, is_bot: false, first_name: "U" },
+          text: "180"
+        }
+      });
+
+      const sendPhotoUpdate = (updateId: number, fileId: string) =>
+        bot.handleUpdate({
+          update_id: updateId,
+          message: {
+            message_id: updateId,
+            date: 1,
+            chat: { id: 10, type: "private", first_name: "U" },
+            from: { id: 10, is_bot: false, first_name: "U" },
+            photo: [
+              { file_id: `${fileId}_s`, file_unique_id: `${fileId}_us`, width: 10, height: 10 },
+              { file_id: fileId, file_unique_id: `${fileId}_u`, width: 100, height: 100 }
+            ]
+          }
+        });
+
+      await sendPhotoUpdate(6, "front_file");
+      await sendPhotoUpdate(7, "left_file");
+      await sendPhotoUpdate(8, "right_file");
+      await sendPhotoUpdate(9, "back_file");
+
+      await bot.handleUpdate({
+        update_id: 10,
+        callback_query: {
+          id: "cb_goal_w",
+          from: { id: 10, is_bot: false, first_name: "U" },
+          chat_instance: "ci_goal",
+          message: {
+            message_id: 10,
+            date: 1,
+            chat: { id: 10, type: "private", first_name: "U" },
+            text: "dummy"
+          },
+          data: "onb_goal_weight_accept"
+        }
+      });
+      await bot.handleUpdate({
+        update_id: 11,
+        callback_query: {
+          id: "cb_goal_waist",
+          from: { id: 10, is_bot: false, first_name: "U" },
+          chat_instance: "ci_goal",
+          message: {
+            message_id: 11,
+            date: 1,
+            chat: { id: 10, type: "private", first_name: "U" },
+            text: "dummy"
+          },
+          data: "onb_goal_waist_accept"
+        }
+      });
+      await bot.handleUpdate({
+        update_id: 12,
+        message: {
+          message_id: 12,
+          date: 1,
+          chat: { id: 10, type: "private", first_name: "U" },
+          from: { id: 10, is_bot: false, first_name: "U" },
+          text: "1 2"
+        }
+      });
+
+      const done = apiCalls
+        .filter((c) => c.method === "sendMessage" && (c.payload as any).chat_id === 10)
+        .map((c) => c.payload as any)
+        .reverse()
+        .find((p) => typeof p?.text === "string" && p.text.includes("Онбординг завершён"));
+      expect(done).toBeTruthy();
+
+      const kb = (done as any).reply_markup?.inline_keyboard;
+      expect(Array.isArray(kb)).toBe(true);
+      const callbackData = (kb as any[]).flat().map((b: any) => b?.callback_data);
+      expect(callbackData).toContain(`paid_${participantId}`);
     } finally {
       close();
     }

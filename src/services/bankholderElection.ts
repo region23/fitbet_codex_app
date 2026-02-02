@@ -2,7 +2,7 @@ import type { Api } from "grammy";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { and, eq, inArray } from "drizzle-orm";
 import { InlineKeyboard } from "grammy";
-import { bankHolderElections, bankHolderVotes, challenges, participants } from "../db/schema.js";
+import { bankHolderElections, bankHolderVotes, challenges, participants, payments } from "../db/schema.js";
 
 export type FinalizeElectionMode = "all_votes" | "timeout";
 
@@ -115,6 +115,47 @@ export async function finalizeBankHolderElection(opts: {
     }
   }
 
+  // If кто-то отметил оплату ДО выбора Bank Holder — после завершения выборов попросим подтвердить.
+  for (const p of eligible) {
+    if (p.status !== "payment_marked") continue;
+
+    // Если это сам Bank Holder — подтверждаем сразу (как в обычном paid flow).
+    if (p.userId === winnerUserId) {
+      opts.db
+        .insert(payments)
+        .values({
+          participantId: p.id,
+          status: "confirmed",
+          markedPaidAt: opts.now,
+          confirmedAt: opts.now,
+          confirmedBy: winnerUserId
+        })
+        .onConflictDoUpdate({
+          target: payments.participantId,
+          set: { status: "confirmed", markedPaidAt: opts.now, confirmedAt: opts.now, confirmedBy: winnerUserId }
+        })
+        .run();
+      opts.db.update(participants).set({ status: "active" }).where(eq(participants.id, p.id)).run();
+      try {
+        await opts.api.sendMessage(p.userId, "Оплата подтверждена ✅ (вы Bank Holder).");
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+
+    const who = p.username ? `@${p.username}` : p.firstName ?? `id ${p.userId}`;
+    const kb = new InlineKeyboard().text("✅ Подтвердить оплату", `confirm_${p.id}`);
+    try {
+      await opts.api.sendMessage(
+        winnerUserId,
+        `Участник ${who} ранее отметил оплату. Подтвердите, пожалуйста:`,
+        { reply_markup: kb }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
   return { finalized: true as const, winnerUserId };
 }
-

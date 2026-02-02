@@ -76,6 +76,14 @@ describe("payments", () => {
       const pay1 = db.select().from(payments).where(eq(payments.participantId, p1)).get()!;
       expect(pay1.status).toBe("marked_paid");
 
+      const hidePay1 = apiCalls.find(
+        (c) =>
+          c.method === "editMessageReplyMarkup" &&
+          (c.payload as any).chat_id === 10 &&
+          (c.payload as any).message_id === 1
+      );
+      expect(hidePay1).toBeTruthy();
+
       // Bank holder should receive a confirmation request
       const toBank = apiCalls.find(
         (c) => c.method === "sendMessage" && (c.payload as any).chat_id === 20
@@ -102,6 +110,14 @@ describe("payments", () => {
 
       const p2Row = db.select().from(participants).where(eq(participants.id, p2)).get()!;
       expect(p2Row.status).toBe("active");
+
+      const hidePay2 = apiCalls.find(
+        (c) =>
+          c.method === "editMessageReplyMarkup" &&
+          (c.payload as any).chat_id === 20 &&
+          (c.payload as any).message_id === 2
+      );
+      expect(hidePay2).toBeTruthy();
 
       // Bank holder confirms user 10
       await bot.handleUpdate({
@@ -136,6 +152,70 @@ describe("payments", () => {
         .where(eq(checkinWindows.challengeId, challengeId))
         .all();
       expect(windows.length).toBeGreaterThan(0);
+    } finally {
+      close();
+    }
+  });
+
+  it("does not allow marking paid before bank holder is chosen", async () => {
+    const { bot, db, close } = createTestBot({
+      now: () => 1_700_000_000_000
+    });
+    try {
+      const challengeId = db
+        .insert(challenges)
+        .values({
+          chatId: -100,
+          chatTitle: "Test Chat",
+          creatorId: 1,
+          durationMonths: 6,
+          stakeAmount: 1000,
+          disciplineThreshold: 0.8,
+          maxSkips: 2,
+          status: "draft",
+          createdAt: 1_700_000_000_000
+        })
+        .returning({ id: challenges.id })
+        .get().id;
+
+      const participantId = db
+        .insert(participants)
+        .values({
+          challengeId,
+          userId: 10,
+          username: "u1",
+          firstName: "U1",
+          status: "pending_payment",
+          joinedAt: 1_700_000_000_000
+        })
+        .returning({ id: participants.id })
+        .get().id;
+
+      db.insert(payments)
+        .values({ participantId, status: "pending" })
+        .onConflictDoUpdate({ target: payments.participantId, set: { status: "pending" } })
+        .run();
+
+      await bot.handleUpdate({
+        update_id: 1,
+        callback_query: {
+          id: "cb_paid_no_bh",
+          from: { id: 10, is_bot: false, first_name: "U1" },
+          chat_instance: "ci_paid",
+          message: {
+            message_id: 1,
+            date: 1,
+            chat: { id: 10, type: "private", first_name: "U1" },
+            text: "dummy"
+          },
+          data: `paid_${participantId}`
+        }
+      });
+
+      const p = db.select().from(participants).where(eq(participants.id, participantId)).get()!;
+      expect(p.status).toBe("pending_payment");
+      const pay = db.select().from(payments).where(eq(payments.participantId, participantId)).get()!;
+      expect(pay.status).toBe("pending");
     } finally {
       close();
     }
