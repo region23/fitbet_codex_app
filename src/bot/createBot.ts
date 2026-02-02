@@ -11,6 +11,7 @@ import {
   bankHolderElections,
   bankHolderVotes,
   challenges,
+  goals,
   participants
 } from "../db/schema.js";
 import { and, count, eq, inArray } from "drizzle-orm";
@@ -141,9 +142,69 @@ export function createFitbetBot(deps: CreateBotDeps) {
   bot.command("status", async (ctx) => {
     if (!ctx.chat) return;
     if (ctx.chat.type === "private") {
-      await ctx.reply("Статус: пока нет активных участий. Напишите /start.");
+      if (!ctx.from) return;
+      const rows = deps.db
+        .select({
+          participantId: participants.id,
+          participantStatus: participants.status,
+          track: participants.track,
+          startWeight: participants.startWeight,
+          startWaist: participants.startWaist,
+          height: participants.height,
+          completedCheckins: participants.completedCheckins,
+          totalCheckins: participants.totalCheckins,
+          skippedCheckins: participants.skippedCheckins,
+          chatTitle: challenges.chatTitle,
+          chatId: challenges.chatId,
+          challengeStatus: challenges.status,
+          startedAt: challenges.startedAt,
+          endsAt: challenges.endsAt
+        })
+        .from(participants)
+        .leftJoin(challenges, eq(participants.challengeId, challenges.id))
+        .where(eq(participants.userId, ctx.from.id))
+        .all();
+
+      if (rows.length === 0) {
+        await ctx.reply("У вас пока нет участий. Добавьте бота в группу и нажмите «Участвовать».");
+        return;
+      }
+
+      const parts: string[] = ["*Ваши участия:*"];
+      for (const r of rows) {
+        const title = r.chatTitle ?? `чат ${r.chatId ?? "?"}`;
+        const dates =
+          r.startedAt && r.endsAt
+            ? `\nПериод: ${new Date(r.startedAt).toLocaleDateString("ru-RU")} → ${new Date(r.endsAt).toLocaleDateString("ru-RU")}`
+            : "";
+        const goal = deps.db
+          .select()
+          .from(goals)
+          .where(eq(goals.participantId, r.participantId))
+          .get();
+        const goalLine = goal ? `\nЦель: ${goal.targetWeight} кг / ${goal.targetWaist} см` : "";
+        const metrics =
+          r.startWeight != null && r.startWaist != null && r.height != null
+            ? `\nСтарт: ${r.startWeight} кг / ${r.startWaist} см, рост ${r.height} см`
+            : "";
+        const checkinsLine = `\nЧек-ины: ${r.completedCheckins}/${r.totalCheckins}, пропуски ${r.skippedCheckins}`;
+        const action =
+          r.participantStatus === "onboarding"
+            ? "\nДействие: напишите /start чтобы продолжить онбординг."
+            : r.participantStatus === "pending_payment"
+              ? "\nДействие: дождитесь выбора Bank Holder и оплатите участие."
+              : r.participantStatus === "active"
+                ? "\nДействие: ждите окна чек-ина или напишите /start если приглашены."
+                : "";
+
+        parts.push(
+          `\n*${title}*\nСтатус участия: *${r.participantStatus}*\nСтатус челленджа: *${r.challengeStatus}*${dates}${metrics}${goalLine}${checkinsLine}${action}`
+        );
+      }
+      await ctx.reply(parts.join("\n"), { parse_mode: "Markdown" });
       return;
     }
+
     const current = deps.db
       .select()
       .from(challenges)
@@ -153,15 +214,28 @@ export function createFitbetBot(deps: CreateBotDeps) {
       await ctx.reply("В этом чате пока нет активного челленджа. Создайте через /create.");
       return;
     }
-    const total = deps.db
-      .select({ c: count() })
+
+    const list = deps.db
+      .select()
       .from(participants)
       .where(eq(participants.challengeId, current.id))
-      .get()?.c ?? 0;
-    await ctx.reply(
-      `Текущий челлендж: статус *${current.status}*, участников: *${total}*`,
-      { parse_mode: "Markdown" }
-    );
+      .all();
+    const lines = list
+      .sort((a, b) => a.userId - b.userId)
+      .map((p) => {
+        const name = p.username ? `@${p.username}` : p.firstName ?? String(p.userId);
+        return `${name} — ${p.status} (чек-ины ${p.completedCheckins}/${p.totalCheckins}, пропуски ${p.skippedCheckins})`;
+      });
+
+    const thresholdPct = Math.round(current.disciplineThreshold * 100);
+    const header = `*Челлендж в этом чате*\nСтатус: *${current.status}*\nДлительность: *${current.durationMonths}*\nСтавка: *${current.stakeAmount} ₽*\nПорог дисциплины: *${thresholdPct}%*\nМакс. пропусков: *${current.maxSkips}*`;
+    const bank = current.bankHolderUsername
+      ? `\nBank Holder: @${current.bankHolderUsername}`
+      : current.bankHolderId
+        ? `\nBank Holder: ${current.bankHolderId}`
+        : "";
+
+    await ctx.reply(`${header}${bank}\n\n*Участники:*\n${lines.join("\n") || "—"}`, { parse_mode: "Markdown" });
   });
 
   bot.command("create", async (ctx) => {
