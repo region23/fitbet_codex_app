@@ -12,6 +12,7 @@ import {
   bankHolderVotes,
   challenges,
   goals,
+  participantCommitments,
   participants
 } from "../db/schema.js";
 import { and, count, eq, inArray } from "drizzle-orm";
@@ -373,6 +374,12 @@ export function createFitbetBot(deps: CreateBotDeps) {
         })
         .where(eq(participants.id, existing.id))
         .run();
+      deps.db.delete(goals).where(eq(goals.participantId, existing.id)).run();
+      deps.db
+        .delete(participantCommitments)
+        .where(eq(participantCommitments.participantId, existing.id))
+        .run();
+      deps.db.delete(payments).where(eq(payments.participantId, existing.id)).run();
     } else {
       deps.db
         .insert(participants)
