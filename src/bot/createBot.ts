@@ -21,6 +21,8 @@ import { createTelegramFileStore, type FileStore } from "../services/fileStore.j
 import { payments } from "../db/schema.js";
 import { checkinWindowHours } from "../constants.js";
 import { generateCheckinWindowsForChallenge } from "../services/checkinWindows.js";
+import { checkinConversation } from "./conversations/checkinConversation.js";
+import { checkinWindows } from "../db/schema.js";
 
 type CreateBotDeps = {
   token: string;
@@ -86,11 +88,39 @@ export function createFitbetBot(deps: CreateBotDeps) {
       "onboarding"
     )
   );
+  bot.use(
+    createConversation(
+      (conversation, ctx, participantId, windowId) =>
+        checkinConversation(conversation, ctx, Number(participantId), Number(windowId), {
+          db: deps.db,
+          now,
+          files
+        }),
+      "checkin"
+    )
+  );
 
   bot.command("help", (ctx) => ctx.reply(helpText, { parse_mode: "Markdown" }));
 
   bot.command("start", async (ctx) => {
     if (ctx.chat?.type === "private") {
+      const pending = deps.db
+        .select()
+        .from(participants)
+        .where(and(eq(participants.userId, ctx.from!.id), eq(participants.status, "active")))
+        .get();
+      if (pending?.pendingCheckinWindowId) {
+        const win = deps.db
+          .select()
+          .from(checkinWindows)
+          .where(eq(checkinWindows.id, pending.pendingCheckinWindowId))
+          .get();
+        if (win && win.status === "open") {
+          await ctx.conversation.enter("checkin", pending.id, win.id);
+          return;
+        }
+      }
+
       const participant = deps.db
         .select()
         .from(participants)
@@ -225,6 +255,47 @@ export function createFitbetBot(deps: CreateBotDeps) {
       );
     } catch {
       // Пользователь мог не начать диалог с ботом
+    }
+  });
+
+  bot.callbackQuery(/^checkin_(\d+)$/, async (ctx) => {
+    const windowId = Number(ctx.match?.[1]);
+    const from = ctx.from;
+    const chat = ctx.chat;
+    if (!from || !chat) return;
+
+    const window = deps.db.select().from(checkinWindows).where(eq(checkinWindows.id, windowId)).get();
+    if (!window || window.status !== "open") {
+      await ctx.answerCallbackQuery({ text: "Окно чек-ина закрыто.", show_alert: true });
+      return;
+    }
+    const challenge = deps.db.select().from(challenges).where(eq(challenges.id, window.challengeId)).get();
+    if (!challenge || challenge.chatId !== chat.id) {
+      await ctx.answerCallbackQuery({ text: "Неверный чат.", show_alert: true });
+      return;
+    }
+    const participant = deps.db
+      .select()
+      .from(participants)
+      .where(and(eq(participants.challengeId, window.challengeId), eq(participants.userId, from.id)))
+      .get();
+    if (!participant || participant.status !== "active") {
+      await ctx.answerCallbackQuery({ text: "Чек-ин доступен только активным участникам.", show_alert: true });
+      return;
+    }
+
+    const ts = now();
+    deps.db
+      .update(participants)
+      .set({ pendingCheckinWindowId: windowId, pendingCheckinRequestedAt: ts })
+      .where(eq(participants.id, participant.id))
+      .run();
+
+    await ctx.answerCallbackQuery({ text: "Отлично! Перейдите в личку и напишите /start." });
+    try {
+      await ctx.api.sendMessage(from.id, "Чтобы сдать чек-ин, напишите /start.");
+    } catch {
+      // ignore
     }
   });
 
