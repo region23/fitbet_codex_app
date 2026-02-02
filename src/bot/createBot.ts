@@ -25,6 +25,7 @@ import { generateCheckinWindowsForChallenge } from "../services/checkinWindows.j
 import { checkinConversation } from "./conversations/checkinConversation.js";
 import { checkinWindows } from "../db/schema.js";
 import { seedCommitmentTemplates } from "../db/seeds.js";
+import { finalizeBankHolderElection } from "../services/bankholderElection.js";
 
 type CreateBotDeps = {
   token: string;
@@ -664,7 +665,13 @@ export function createFitbetBot(deps: CreateBotDeps) {
       // ignore
     }
 
-    await maybeFinalizeElection(deps, ctx.api, electionId, ts);
+    await finalizeBankHolderElection({
+      db: deps.db,
+      api: ctx.api,
+      electionId,
+      now: ts,
+      mode: "all_votes"
+    });
   });
 
   bot.command("clear_db", async (ctx) => {
@@ -730,100 +737,6 @@ export function createFitbetBot(deps: CreateBotDeps) {
   });
 
   return bot;
-}
-
-async function maybeFinalizeElection(
-  deps: CreateBotDeps,
-  api: BotContext["api"],
-  electionId: number,
-  ts: number
-) {
-  const election = deps.db.select().from(bankHolderElections).where(eq(bankHolderElections.id, electionId)).get();
-  if (!election || election.status !== "in_progress") return;
-
-  const eligible = deps.db
-    .select()
-    .from(participants)
-    .where(
-      and(
-        eq(participants.challengeId, election.challengeId),
-        inArray(participants.status, ["pending_payment", "payment_marked", "active"])
-      )
-    )
-    .all();
-  if (eligible.length === 0) return;
-
-  const votes = deps.db
-    .select()
-    .from(bankHolderVotes)
-    .where(eq(bankHolderVotes.electionId, electionId))
-    .all();
-
-  const voterIds = new Set(votes.map((v) => v.voterId));
-  if (voterIds.size < eligible.length) return; // ждём остальных
-
-  // Подсчёт голосов
-  const counts = new Map<number, number>();
-  for (const v of votes) counts.set(v.votedForId, (counts.get(v.votedForId) ?? 0) + 1);
-
-  const eligibleUserIds = eligible.map((p) => p.userId).sort((a, b) => a - b);
-  const creatorId = deps.db.select({ creatorId: challenges.creatorId }).from(challenges).where(eq(challenges.id, election.challengeId)).get()?.creatorId;
-
-  let winnerUserId: number;
-  if (counts.size === 0) {
-    winnerUserId = creatorId && eligibleUserIds.includes(creatorId) ? creatorId : eligibleUserIds[0]!;
-  } else {
-    let bestVotes = -1;
-    let bestUserId = eligibleUserIds[0]!;
-    for (const uid of eligibleUserIds) {
-      const c = counts.get(uid) ?? 0;
-      if (c > bestVotes) {
-        bestVotes = c;
-        bestUserId = uid;
-      }
-    }
-    // при равенстве — минимальный user_id, поэтому порядок eligibleUserIds
-    winnerUserId = bestUserId;
-  }
-
-  const winner = eligible.find((p) => p.userId === winnerUserId);
-  deps.db
-    .update(challenges)
-    .set({
-      bankHolderId: winnerUserId,
-      bankHolderUsername: winner?.username ?? null,
-      status: "pending_payments"
-    })
-    .where(eq(challenges.id, election.challengeId))
-    .run();
-  deps.db
-    .update(bankHolderElections)
-    .set({ status: "completed", completedAt: ts })
-    .where(eq(bankHolderElections.id, electionId))
-    .run();
-
-  const challenge = deps.db.select().from(challenges).where(eq(challenges.id, election.challengeId)).get();
-  if (!challenge) return;
-
-  const label = winner?.username ? `@${winner.username}` : winner?.firstName ?? String(winnerUserId);
-  await api.sendMessage(challenge.chatId, `🏦 Bank Holder выбран: ${label}`);
-  try {
-    await api.sendMessage(winnerUserId, "Вы выбраны Bank Holder. Вам будут приходить запросы на подтверждение оплат.");
-  } catch {
-    // ignore
-  }
-
-  const payKb = (pid: number) => new InlineKeyboard().text("💳 Я оплатил", `paid_${pid}`);
-  for (const p of eligible) {
-    if (p.status !== "pending_payment") continue;
-    try {
-      await api.sendMessage(p.userId, "Пора оплатить участие. Нажмите кнопку после оплаты:", {
-        reply_markup: payKb(p.id)
-      });
-    } catch {
-      // ignore
-    }
-  }
 }
 
 async function maybeActivateChallenge(

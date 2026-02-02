@@ -3,12 +3,14 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { InlineKeyboard } from "grammy";
 import {
+  bankHolderElections,
   challenges,
   checkinWindows,
   checkins,
   participants
 } from "../db/schema.js";
 import { reminderHoursBeforeClose } from "../constants.js";
+import { finalizeBankHolderElection } from "../services/bankholderElection.js";
 
 type Deps = {
   db: BetterSQLite3Database;
@@ -187,3 +189,58 @@ export async function closeCheckinWindows(deps: Deps) {
   }
 }
 
+export async function handleOnboardingTimeouts(deps: Deps, timeoutMs = 48 * 60 * 60 * 1000) {
+  const ts = deps.now();
+  const limit = ts - timeoutMs;
+
+  const stale = deps.db
+    .select()
+    .from(participants)
+    .where(and(eq(participants.status, "onboarding"), lte(participants.joinedAt, limit)))
+    .all();
+
+  for (const p of stale) {
+    deps.db.update(participants).set({ status: "dropped" }).where(eq(participants.id, p.id)).run();
+    const ch = deps.db.select().from(challenges).where(eq(challenges.id, p.challengeId)).get();
+    if (!ch) continue;
+    const label = p.username ? `@${p.username}` : p.firstName ?? `id ${p.userId}`;
+    try {
+      await deps.api.sendMessage(ch.chatId, `⏳ ${label} не завершил(а) онбординг за 48 часов и выбыл(а) из челленджа.`);
+    } catch {
+      // ignore
+    }
+    try {
+      await deps.api.sendMessage(
+        p.userId,
+        "Онбординг не завершён за 48 часов, вы исключены из текущего челленджа. Присоединитесь к следующему."
+      );
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export async function finalizeOverdueBankHolderElections(
+  deps: Deps,
+  timeoutMs = 24 * 60 * 60 * 1000
+) {
+  const ts = deps.now();
+  const limit = ts - timeoutMs;
+
+  const overdue = deps.db
+    .select()
+    .from(bankHolderElections)
+    .where(and(eq(bankHolderElections.status, "in_progress"), lte(bankHolderElections.createdAt, limit)))
+    .all();
+
+  for (const e of overdue) {
+    await finalizeBankHolderElection({
+      db: deps.db,
+      api: deps.api,
+      electionId: e.id,
+      now: ts,
+      mode: "timeout",
+      timeoutMs
+    });
+  }
+}

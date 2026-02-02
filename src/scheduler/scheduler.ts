@@ -2,7 +2,13 @@ import type { Api } from "grammy";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import cron from "node-cron";
 import type { AppEnv } from "../config.js";
-import { closeCheckinWindows, openCheckinWindows, sendCheckinReminders } from "./tasks.js";
+import {
+  closeCheckinWindows,
+  finalizeOverdueBankHolderElections,
+  handleOnboardingTimeouts,
+  openCheckinWindows,
+  sendCheckinReminders
+} from "./tasks.js";
 
 type Deps = {
   env: AppEnv;
@@ -15,6 +21,8 @@ export function startScheduler(deps: Deps) {
   const now = deps.now ?? (() => Date.now());
   const tick = async () => {
     try {
+      await handleOnboardingTimeouts({ db: deps.db, api: deps.api, now });
+      await finalizeOverdueBankHolderElections({ db: deps.db, api: deps.api, now });
       await openCheckinWindows({ db: deps.db, api: deps.api, now });
       await sendCheckinReminders({ db: deps.db, api: deps.api, now });
       await closeCheckinWindows({ db: deps.db, api: deps.api, now });
@@ -37,4 +45,3 @@ export function startScheduler(deps: Deps) {
     stop: () => task.stop()
   };
 }
-
