@@ -2,6 +2,7 @@ import "dotenv/config";
 import { getEnv } from "./config.js";
 import { createAppDb } from "./db/client.js";
 import { createFitbetBot } from "./bot/createBot.js";
+import { startScheduler } from "./scheduler/scheduler.js";
 
 const env = getEnv();
 
@@ -18,4 +19,5 @@ const bot = createFitbetBot({
 });
 
 console.log("FitBet: bot starting…");
+startScheduler({ env, db: appDb.db, api: bot.api });
 await bot.start();
