@@ -49,7 +49,7 @@ export async function createChallengeConversation(
 
   const duration = Number(durationCtx.match?.[1]);
 
-  await durationCtx.reply("Введите ставку в рублях (например, 1000):");
+  await durationCtx.reply("Введите ставку в рублях (например, 1000):\nответом на это сообщение.");
 
   const stake = await readPositiveFloat(conversation, creatorId);
 
