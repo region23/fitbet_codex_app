@@ -1,10 +1,11 @@
 import type { Conversation } from "@grammyjs/conversations";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { InlineKeyboard, type Context } from "grammy";
 import path from "node:path";
 import { photosDirectory } from "../../constants.js";
 import {
+  bankHolderElections,
   commitmentTemplates,
   goals,
   participantCommitments,
@@ -267,6 +268,31 @@ export async function onboardingConversation(
       })
       .run();
   });
+
+  const election = await conversation.external(() =>
+    deps.db
+      .select()
+      .from(bankHolderElections)
+      .where(and(eq(bankHolderElections.challengeId, initialParticipant.challengeId), eq(bankHolderElections.status, "in_progress")))
+      .get()
+  );
+  if (election) {
+    const eligible = await conversation.external(() =>
+      deps.db
+        .select()
+        .from(participants)
+        .where(and(eq(participants.challengeId, initialParticipant.challengeId), eq(participants.status, "pending_payment")))
+        .all()
+    );
+    if (eligible.length >= 2) {
+      const kb = new InlineKeyboard();
+      eligible.forEach((p) => {
+        const label = p.username ? `@${p.username}` : p.firstName ?? String(p.userId);
+        kb.text(label, `vote_${election.id}_${p.userId}`).row();
+      });
+      await ctx.reply("Голосование за Bank Holder уже идёт — проголосуйте:", { reply_markup: kb });
+    }
+  }
 
   const payKb = new InlineKeyboard().text("💳 Я оплатил", `paid_${participantId}`);
   await ctx.reply("Онбординг завершён! После оплаты нажмите кнопку:", { reply_markup: payKb });
