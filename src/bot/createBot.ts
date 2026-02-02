@@ -26,6 +26,7 @@ import { checkinConversation } from "./conversations/checkinConversation.js";
 import { checkinWindows } from "../db/schema.js";
 import { seedCommitmentTemplates } from "../db/seeds.js";
 import { finalizeBankHolderElection } from "../services/bankholderElection.js";
+import { createOpenRouterClient, type OpenRouterClient } from "../services/openRouter.js";
 
 type CreateBotDeps = {
   token: string;
@@ -45,6 +46,9 @@ export function createFitbetBot(deps: CreateBotDeps) {
   });
   const now = deps.now ?? (() => Date.now());
   const files = deps.files ?? createTelegramFileStore();
+  const llm: OpenRouterClient | undefined = deps.env.OPENROUTER_API_KEY
+    ? createOpenRouterClient({ apiKey: deps.env.OPENROUTER_API_KEY })
+    : undefined;
 
   if (deps.env.NODE_ENV !== "test") {
     bot.use(async (ctx, next) => {
@@ -86,7 +90,8 @@ export function createFitbetBot(deps: CreateBotDeps) {
           db: deps.db,
           env: deps.env,
           now,
-          files
+          files,
+          llm
         }),
       "onboarding"
     )

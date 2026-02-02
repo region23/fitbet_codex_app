@@ -14,12 +14,14 @@ import {
 import type { AppEnv } from "../../config.js";
 import type { BotContext } from "../context.js";
 import type { FileStore } from "../../services/fileStore.js";
+import type { OpenRouterClient } from "../../services/openRouter.js";
 
 type Deps = {
   db: BetterSQLite3Database;
   env: AppEnv;
   now: () => number;
   files: FileStore;
+  llm?: OpenRouterClient;
 };
 
 export async function onboardingConversation(
@@ -215,8 +217,8 @@ export async function onboardingConversation(
     "startPhotoBackId"
   );
 
-  // 9) Goal
-  const goal = await askGoal(conversation, ctx, state);
+  // 9) Goal (+ LLM validation, если доступна)
+  const goalWithValidation = await askGoalWithValidation(conversation, ctx, state, deps);
   const now = await conversation.now();
   await conversation.external(() => {
     deps.db.delete(goals).where(eq(goals.participantId, participantId)).run();
@@ -224,12 +226,12 @@ export async function onboardingConversation(
       .insert(goals)
       .values({
         participantId,
-        targetWeight: goal.targetWeight,
-        targetWaist: goal.targetWaist,
-        isValidated: !deps.env.OPENROUTER_API_KEY,
-        validationResult: deps.env.OPENROUTER_API_KEY ? null : "realistic",
-        validationFeedback: null,
-        validatedAt: deps.env.OPENROUTER_API_KEY ? null : now,
+        targetWeight: goalWithValidation.targetWeight,
+        targetWaist: goalWithValidation.targetWaist,
+        isValidated: goalWithValidation.isValidated,
+        validationResult: goalWithValidation.validationResult,
+        validationFeedback: goalWithValidation.validationFeedback,
+        validatedAt: goalWithValidation.isValidated ? now : null,
         createdAt: now,
         updatedAt: now
       })
@@ -412,6 +414,102 @@ async function askGoal(
   );
 
   return { targetWeight, targetWaist };
+}
+
+async function askGoalWithValidation(
+  conversation: Conversation<BotContext, Context>,
+  ctx: Context,
+  state: {
+    track: "cut" | "bulk" | null;
+    startWeight: number | null;
+    startWaist: number | null;
+    height: number | null;
+  },
+  deps: Deps
+): Promise<{
+  targetWeight: number;
+  targetWaist: number;
+  isValidated: boolean;
+  validationResult: "realistic" | "too_aggressive" | "too_easy" | null;
+  validationFeedback: string | null;
+}> {
+  let revisions = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const goal = await askGoal(conversation, ctx, state);
+    if (!deps.llm) {
+      return {
+        ...goal,
+        isValidated: true,
+        validationResult: "realistic",
+        validationFeedback: null
+      };
+    }
+
+    let validation: { result: "realistic" | "too_aggressive" | "too_easy"; feedback: string } | null = null;
+    try {
+      const res = await conversation.external(() =>
+        deps.llm!.validateGoal({
+          track: state.track ?? "cut",
+          startWeight: state.startWeight!,
+          startWaist: state.startWaist!,
+          heightCm: state.height!,
+          targetWeight: goal.targetWeight,
+          targetWaist: goal.targetWaist
+        })
+      );
+      validation = { result: res.result, feedback: res.feedback };
+    } catch {
+      // LLM недоступен — принимаем цель автоматически
+      return {
+        ...goal,
+        isValidated: false,
+        validationResult: null,
+        validationFeedback: null
+      };
+    }
+
+    if (validation.result === "realistic") {
+      return {
+        ...goal,
+        isValidated: true,
+        validationResult: "realistic",
+        validationFeedback: validation.feedback || null
+      };
+    }
+
+    revisions += 1;
+    if (revisions >= 3) {
+      await ctx.reply("Я вижу, что цель спорная, но принимаю её (лимит пересмотров исчерпан).");
+      return {
+        ...goal,
+        isValidated: true,
+        validationResult: validation.result,
+        validationFeedback: validation.feedback || null
+      };
+    }
+
+    const kb = new InlineKeyboard()
+      .text("🔄 Пересмотреть", "onb_goal_revise")
+      .text("✅ Оставить", "onb_goal_keep");
+    await ctx.reply(
+      `Проверка цели: *${validation.result}*\n${validation.feedback}\n\nПересмотреть цель?`,
+      { parse_mode: "Markdown", reply_markup: kb }
+    );
+    const choice = await conversation
+      .waitForCallbackQuery(["onb_goal_revise", "onb_goal_keep"])
+      .andFrom(ctx.from!.id);
+    await choice.answerCallbackQuery();
+    if (choice.callbackQuery.data === "onb_goal_keep") {
+      return {
+        ...goal,
+        isValidated: true,
+        validationResult: validation.result,
+        validationFeedback: validation.feedback || null
+      };
+    }
+  }
 }
 
 async function askGoalNumber(
