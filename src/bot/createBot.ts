@@ -30,6 +30,8 @@ import { finalizeBankHolderElection } from "../services/bankholderElection.js";
 import { createOpenRouterClient, type OpenRouterClient } from "../services/openRouter.js";
 import { captureException } from "../monitoring/sentry.js";
 import { formatChallengeDuration } from "./duration.js";
+import { formatChallengeStatusRu, formatParticipantStatusRu } from "./statusLabels.js";
+import { escapeTelegramMarkdown } from "./telegramMarkdown.js";
 
 type CreateBotDeps = {
   token: string;
@@ -198,6 +200,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
       const parts: string[] = ["*Ваши участия:*"];
       for (const r of rows) {
         const title = r.chatTitle ?? `чат ${r.chatId ?? "?"}`;
+        const safeTitle = escapeTelegramMarkdown(title.replace(/\s+/g, " ").trim());
         const dates =
           r.startedAt && r.endsAt
             ? `\nПериод: ${new Date(r.startedAt).toLocaleDateString("ru-RU")} → ${new Date(r.endsAt).toLocaleDateString("ru-RU")}`
@@ -223,7 +226,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
                 : "";
 
         parts.push(
-          `\n*${title}*\nСтатус участия: *${r.participantStatus}*\nСтатус челленджа: *${r.challengeStatus}*${dates}${metrics}${goalLine}${checkinsLine}${action}`
+          `\n*${safeTitle}*\nСтатус участия: *${escapeTelegramMarkdown(formatParticipantStatusRu(r.participantStatus))}*\nСтатус челленджа: *${escapeTelegramMarkdown(formatChallengeStatusRu(r.challengeStatus))}*${dates}${metrics}${goalLine}${checkinsLine}${action}`
         );
       }
       await ctx.reply(parts.join("\n"), { parse_mode: "Markdown" });
@@ -249,13 +252,13 @@ export function createFitbetBot(deps: CreateBotDeps) {
       .sort((a, b) => a.userId - b.userId)
       .map((p) => {
         const name = p.username ? `@${p.username}` : p.firstName ?? String(p.userId);
-        return `${name} — ${p.status} (чек-ины ${p.completedCheckins}/${p.totalCheckins}, пропуски ${p.skippedCheckins})`;
+        return `${escapeTelegramMarkdown(name)} — ${escapeTelegramMarkdown(formatParticipantStatusRu(p.status))} (чек-ины ${p.completedCheckins}/${p.totalCheckins}, пропуски ${p.skippedCheckins})`;
     });
 
     const thresholdPct = Math.round(current.disciplineThreshold * 100);
-    const header = `*Челлендж в этом чате*\nСтатус: *${current.status}*\nДлительность: *${formatChallengeDuration(current.durationMonths, deps.env.CHALLENGE_DURATION_UNIT)}*\nСтавка: *${current.stakeAmount} ₽*\nПорог дисциплины: *${thresholdPct}%*\nМакс. пропусков: *${current.maxSkips}*`;
+    const header = `*Челлендж в этом чате*\nСтатус: *${escapeTelegramMarkdown(formatChallengeStatusRu(current.status))}*\nДлительность: *${escapeTelegramMarkdown(formatChallengeDuration(current.durationMonths, deps.env.CHALLENGE_DURATION_UNIT))}*\nСтавка: *${current.stakeAmount} ₽*\nПорог дисциплины: *${thresholdPct}%*\nМакс. пропусков: *${current.maxSkips}*`;
     const bank = current.bankHolderUsername
-      ? `\nBank Holder: @${current.bankHolderUsername}`
+      ? `\nBank Holder: @${escapeTelegramMarkdown(current.bankHolderUsername)}`
       : current.bankHolderId
         ? `\nBank Holder: ${current.bankHolderId}`
         : "";
@@ -285,7 +288,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
         ? new InlineKeyboard().text(`🙋 Участвовать (${total})`, `join_${current.id}`)
         : undefined;
       await ctx.reply(
-        `Текущий челлендж:\nДлительность: ${formatChallengeDuration(current.durationMonths, deps.env.CHALLENGE_DURATION_UNIT)}\nСтавка: ${current.stakeAmount} ₽\nПорог дисциплины: ${thresholdPct}%\nМакс. пропусков: ${current.maxSkips}\nСтатус: ${current.status}`,
+        `Текущий челлендж:\nДлительность: ${formatChallengeDuration(current.durationMonths, deps.env.CHALLENGE_DURATION_UNIT)}\nСтавка: ${current.stakeAmount} ₽\nПорог дисциплины: ${thresholdPct}%\nМакс. пропусков: ${current.maxSkips}\nСтатус: ${formatChallengeStatusRu(current.status)}`,
         kb ? { reply_markup: kb } : undefined
       );
       return;
@@ -331,8 +334,9 @@ export function createFitbetBot(deps: CreateBotDeps) {
       )
       .get();
     if (blocking && blocking.challengeId !== challengeId) {
+      const title = blocking.chatTitle ?? "другой группе";
       await ctx.answerCallbackQuery({
-        text: `Вы уже участвуете в челлендже в группе «${blocking.chatTitle}» (статус: ${blocking.participantStatus}).`,
+        text: `Вы уже участвуете в челлендже в группе «${title}» (статус: ${formatParticipantStatusRu(blocking.participantStatus)}).`,
         show_alert: true
       });
       return;
