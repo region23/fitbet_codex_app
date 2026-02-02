@@ -7,7 +7,12 @@ import { helpText } from "./helpText.js";
 import type { BotContext, SessionData } from "./context.js";
 import { SqliteSessionStorage } from "./sessionStorage.js";
 import { createChallengeConversation } from "./conversations/createChallengeConversation.js";
-import { challenges, participants } from "../db/schema.js";
+import {
+  bankHolderElections,
+  bankHolderVotes,
+  challenges,
+  participants
+} from "../db/schema.js";
 import { and, count, eq, inArray } from "drizzle-orm";
 import type { UserFromGetMe } from "grammy/types";
 import type { ApiClientOptions } from "grammy";
@@ -361,7 +366,157 @@ export function createFitbetBot(deps: CreateBotDeps) {
   });
 
   bot.command("bankholder", async (ctx) => {
-    await ctx.reply("Команда /bankholder будет доступна после реализации голосования.");
+    if (!ctx.chat || (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup")) {
+      await ctx.reply("Команда /bankholder доступна только в группе.");
+      return;
+    }
+    if (!ctx.from) return;
+
+    const challenge = deps.db
+      .select()
+      .from(challenges)
+      .where(
+        and(
+          eq(challenges.chatId, ctx.chat.id),
+          inArray(challenges.status, ["draft", "pending_payments", "active"])
+        )
+      )
+      .get();
+    if (!challenge) {
+      await ctx.reply("В этом чате нет активного челленджа. Создайте через /create.");
+      return;
+    }
+    if (challenge.status === "completed" || challenge.status === "cancelled") {
+      await ctx.reply("Челлендж уже завершён.");
+      return;
+    }
+    if (challenge.creatorId !== ctx.from.id) {
+      await ctx.reply("Только создатель челленджа может запускать голосование за Bank Holder.");
+      return;
+    }
+    if (challenge.bankHolderId) {
+      await ctx.reply("Bank Holder уже выбран.");
+      return;
+    }
+
+    const eligible = deps.db
+      .select()
+      .from(participants)
+      .where(
+        and(
+          eq(participants.challengeId, challenge.id),
+          inArray(participants.status, ["pending_payment", "payment_marked", "active"])
+        )
+      )
+      .all();
+    if (eligible.length < 2) {
+      await ctx.reply("Нужно минимум 2 участника, завершивших онбординг.");
+      return;
+    }
+
+    const existingElection = deps.db
+      .select()
+      .from(bankHolderElections)
+      .where(and(eq(bankHolderElections.challengeId, challenge.id), eq(bankHolderElections.status, "in_progress")))
+      .get();
+    if (existingElection) {
+      await ctx.reply("Голосование уже идёт.");
+      return;
+    }
+
+    const ts = now();
+    const election = deps.db
+      .insert(bankHolderElections)
+      .values({
+        challengeId: challenge.id,
+        initiatedBy: ctx.from.id,
+        status: "in_progress",
+        createdAt: ts
+      })
+      .returning({ id: bankHolderElections.id })
+      .get();
+
+    await ctx.reply("🗳️ Старт голосования за Bank Holder! Длительность: 24 часа.");
+
+    const buttons = new InlineKeyboard();
+    eligible.forEach((p) => {
+      const label = p.username ? `@${p.username}` : p.firstName ?? String(p.userId);
+      buttons.text(label, `vote_${election.id}_${p.userId}`).row();
+    });
+
+    for (const p of eligible) {
+      try {
+        await ctx.api.sendMessage(
+          p.userId,
+          "Выберите Bank Holder (можно проголосовать один раз):",
+          { reply_markup: buttons }
+        );
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  bot.callbackQuery(/^vote_(\d+)_(\d+)$/, async (ctx) => {
+    if (ctx.chat?.type !== "private") {
+      await ctx.answerCallbackQuery({ text: "Голосование доступно в личке с ботом.", show_alert: true });
+      return;
+    }
+    if (!ctx.from) return;
+
+    const electionId = Number(ctx.match?.[1]);
+    const candidateUserId = Number(ctx.match?.[2]);
+
+    const election = deps.db.select().from(bankHolderElections).where(eq(bankHolderElections.id, electionId)).get();
+    if (!election || election.status !== "in_progress") {
+      await ctx.answerCallbackQuery({ text: "Голосование уже завершено.", show_alert: true });
+      return;
+    }
+
+    const voter = deps.db
+      .select()
+      .from(participants)
+      .where(and(eq(participants.challengeId, election.challengeId), eq(participants.userId, ctx.from.id)))
+      .get();
+    if (!voter || voter.status === "onboarding") {
+      await ctx.answerCallbackQuery({ text: "Вы не можете голосовать.", show_alert: true });
+      return;
+    }
+
+    const candidate = deps.db
+      .select()
+      .from(participants)
+      .where(and(eq(participants.challengeId, election.challengeId), eq(participants.userId, candidateUserId)))
+      .get();
+    if (!candidate || candidate.status === "onboarding") {
+      await ctx.answerCallbackQuery({ text: "Кандидат недоступен.", show_alert: true });
+      return;
+    }
+
+    const ts = now();
+    try {
+      deps.db
+        .insert(bankHolderVotes)
+        .values({
+          electionId,
+          voterId: ctx.from.id,
+          votedForId: candidateUserId,
+          votedAt: ts
+        })
+        .run();
+    } catch {
+      await ctx.answerCallbackQuery({ text: "Вы уже голосовали.", show_alert: true });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: "Голос учтён!" });
+    try {
+      await ctx.editMessageText("Ваш голос учтён ✅");
+    } catch {
+      // ignore
+    }
+
+    await maybeFinalizeElection(deps, ctx.api, electionId, ts);
   });
 
   bot.command("clear_db", async (ctx) => {
@@ -373,6 +528,100 @@ export function createFitbetBot(deps: CreateBotDeps) {
   });
 
   return bot;
+}
+
+async function maybeFinalizeElection(
+  deps: CreateBotDeps,
+  api: BotContext["api"],
+  electionId: number,
+  ts: number
+) {
+  const election = deps.db.select().from(bankHolderElections).where(eq(bankHolderElections.id, electionId)).get();
+  if (!election || election.status !== "in_progress") return;
+
+  const eligible = deps.db
+    .select()
+    .from(participants)
+    .where(
+      and(
+        eq(participants.challengeId, election.challengeId),
+        inArray(participants.status, ["pending_payment", "payment_marked", "active"])
+      )
+    )
+    .all();
+  if (eligible.length === 0) return;
+
+  const votes = deps.db
+    .select()
+    .from(bankHolderVotes)
+    .where(eq(bankHolderVotes.electionId, electionId))
+    .all();
+
+  const voterIds = new Set(votes.map((v) => v.voterId));
+  if (voterIds.size < eligible.length) return; // ждём остальных
+
+  // Подсчёт голосов
+  const counts = new Map<number, number>();
+  for (const v of votes) counts.set(v.votedForId, (counts.get(v.votedForId) ?? 0) + 1);
+
+  const eligibleUserIds = eligible.map((p) => p.userId).sort((a, b) => a - b);
+  const creatorId = deps.db.select({ creatorId: challenges.creatorId }).from(challenges).where(eq(challenges.id, election.challengeId)).get()?.creatorId;
+
+  let winnerUserId: number;
+  if (counts.size === 0) {
+    winnerUserId = creatorId && eligibleUserIds.includes(creatorId) ? creatorId : eligibleUserIds[0]!;
+  } else {
+    let bestVotes = -1;
+    let bestUserId = eligibleUserIds[0]!;
+    for (const uid of eligibleUserIds) {
+      const c = counts.get(uid) ?? 0;
+      if (c > bestVotes) {
+        bestVotes = c;
+        bestUserId = uid;
+      }
+    }
+    // при равенстве — минимальный user_id, поэтому порядок eligibleUserIds
+    winnerUserId = bestUserId;
+  }
+
+  const winner = eligible.find((p) => p.userId === winnerUserId);
+  deps.db
+    .update(challenges)
+    .set({
+      bankHolderId: winnerUserId,
+      bankHolderUsername: winner?.username ?? null,
+      status: "pending_payments"
+    })
+    .where(eq(challenges.id, election.challengeId))
+    .run();
+  deps.db
+    .update(bankHolderElections)
+    .set({ status: "completed", completedAt: ts })
+    .where(eq(bankHolderElections.id, electionId))
+    .run();
+
+  const challenge = deps.db.select().from(challenges).where(eq(challenges.id, election.challengeId)).get();
+  if (!challenge) return;
+
+  const label = winner?.username ? `@${winner.username}` : winner?.firstName ?? String(winnerUserId);
+  await api.sendMessage(challenge.chatId, `🏦 Bank Holder выбран: ${label}`);
+  try {
+    await api.sendMessage(winnerUserId, "Вы выбраны Bank Holder. Вам будут приходить запросы на подтверждение оплат.");
+  } catch {
+    // ignore
+  }
+
+  const payKb = (pid: number) => new InlineKeyboard().text("💳 Я оплатил", `paid_${pid}`);
+  for (const p of eligible) {
+    if (p.status !== "pending_payment") continue;
+    try {
+      await api.sendMessage(p.userId, "Пора оплатить участие. Нажмите кнопку после оплаты:", {
+        reply_markup: payKb(p.id)
+      });
+    } catch {
+      // ignore
+    }
+  }
 }
 
 async function maybeActivateChallenge(
