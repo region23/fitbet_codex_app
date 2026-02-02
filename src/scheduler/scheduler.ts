@@ -5,6 +5,7 @@ import type { AppEnv } from "../config.js";
 import {
   closeCheckinWindows,
   finalizeOverdueBankHolderElections,
+  finalizeEndedChallenges,
   handleOnboardingTimeouts,
   openCheckinWindows,
   sendCheckinReminders
@@ -26,6 +27,7 @@ export function startScheduler(deps: Deps) {
       await openCheckinWindows({ db: deps.db, api: deps.api, now });
       await sendCheckinReminders({ db: deps.db, api: deps.api, now });
       await closeCheckinWindows({ db: deps.db, api: deps.api, now });
+      await finalizeEndedChallenges({ db: deps.db, api: deps.api, now });
     } catch (e) {
       console.error("[scheduler] error", e);
     }
