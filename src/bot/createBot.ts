@@ -102,7 +102,8 @@ export function createFitbetBot(deps: CreateBotDeps) {
         checkinConversation(conversation, ctx, Number(participantId), Number(windowId), {
           db: deps.db,
           now,
-          files
+          files,
+          llm
         }),
       "checkin"
     )
