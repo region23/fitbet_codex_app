@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createTestBot } from "./testkit.js";
-import { challenges, participants, payments } from "../db/schema.js";
+import { challenges, checkinWindows, participants, payments } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("payments", () => {
   it("marks paid, confirms, and activates challenge", async () => {
     const { bot, db, apiCalls, close } = createTestBot({
-      now: () => 1_700_000_000_000
+      now: () => 1_700_000_000_000,
+      env: { CHECKIN_PERIOD_MINUTES: 60 }
     });
     try {
       const challengeId = db
@@ -128,9 +129,15 @@ describe("payments", () => {
       expect(ch.status).toBe("active");
       expect(ch.startedAt).toBe(1_700_000_000_000);
       expect(ch.endsAt).toBe(1_700_000_000_000 + 6 * 60 * 60 * 1000);
+
+      const windows = db
+        .select()
+        .from(checkinWindows)
+        .where(eq(checkinWindows.challengeId, challengeId))
+        .all();
+      expect(windows.length).toBeGreaterThan(0);
     } finally {
       close();
     }
   });
 });
-

@@ -19,6 +19,8 @@ import type { ApiClientOptions } from "grammy";
 import { onboardingConversation } from "./conversations/onboardingConversation.js";
 import { createTelegramFileStore, type FileStore } from "../services/fileStore.js";
 import { payments } from "../db/schema.js";
+import { checkinWindowHours } from "../constants.js";
+import { generateCheckinWindowsForChallenge } from "../services/checkinWindows.js";
 
 type CreateBotDeps = {
   token: string;
@@ -657,6 +659,20 @@ async function maybeActivateChallenge(
     .set({ status: "active", startedAt, endsAt })
     .where(eq(challenges.id, challengeId))
     .run();
+
+  const checkinPeriodMs =
+    deps.env.CHECKIN_PERIOD_MINUTES > 0
+      ? deps.env.CHECKIN_PERIOD_MINUTES * 60 * 1000
+      : deps.env.CHECKIN_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+  const checkinWindowMs = checkinWindowHours * 60 * 60 * 1000;
+  generateCheckinWindowsForChallenge({
+    db: deps.db,
+    challengeId,
+    startedAt,
+    endsAt,
+    checkinPeriodMs,
+    checkinWindowMs
+  });
 
   await api.sendMessage(challenge.chatId, "✅ Все оплаты подтверждены. Челлендж активирован!");
 }
