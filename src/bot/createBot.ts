@@ -23,6 +23,7 @@ import { checkinWindowHours } from "../constants.js";
 import { generateCheckinWindowsForChallenge } from "../services/checkinWindows.js";
 import { checkinConversation } from "./conversations/checkinConversation.js";
 import { checkinWindows } from "../db/schema.js";
+import { seedCommitmentTemplates } from "../db/seeds.js";
 
 type CreateBotDeps = {
   token: string;
@@ -593,7 +594,61 @@ export function createFitbetBot(deps: CreateBotDeps) {
   });
 
   bot.command("clear_db", async (ctx) => {
-    await ctx.reply("Команда /clear_db будет реализована позже.");
+    if (ctx.chat?.type !== "private") {
+      await ctx.reply("Команда /clear_db доступна только в личке.");
+      return;
+    }
+    if (!ctx.from) return;
+    if (!deps.env.ADMIN_TELEGRAM_ID || deps.env.ADMIN_TELEGRAM_ID !== ctx.from.id) {
+      await ctx.reply("Нет доступа.");
+      return;
+    }
+
+    const kb = new InlineKeyboard()
+      .text("Да", "clear_db_yes")
+      .text("Нет", "clear_db_no");
+    await ctx.reply("Точно очистить базу данных? Это удалит все челленджи и данные.", {
+      reply_markup: kb
+    });
+  });
+
+  bot.callbackQuery(["clear_db_yes", "clear_db_no"], async (ctx) => {
+    if (ctx.chat?.type !== "private") {
+      await ctx.answerCallbackQuery({ text: "Команда доступна только в личке.", show_alert: true });
+      return;
+    }
+    if (!ctx.from) return;
+    if (!deps.env.ADMIN_TELEGRAM_ID || deps.env.ADMIN_TELEGRAM_ID !== ctx.from.id) {
+      await ctx.answerCallbackQuery({ text: "Нет доступа.", show_alert: true });
+      return;
+    }
+
+    if (ctx.callbackQuery.data === "clear_db_no") {
+      await ctx.answerCallbackQuery();
+      await ctx.reply("Ок, отменено.");
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    deps.sqlite.exec("PRAGMA foreign_keys = OFF;");
+    deps.sqlite.exec(`
+      DELETE FROM checkin_recommendations;
+      DELETE FROM bank_holder_votes;
+      DELETE FROM bank_holder_elections;
+      DELETE FROM payments;
+      DELETE FROM participant_commitments;
+      DELETE FROM checkins;
+      DELETE FROM checkin_windows;
+      DELETE FROM goals;
+      DELETE FROM participants;
+      DELETE FROM challenges;
+      DELETE FROM commitment_templates;
+      DELETE FROM bot_sessions;
+    `);
+    deps.sqlite.exec("PRAGMA foreign_keys = ON;");
+    seedCommitmentTemplates(deps.db);
+
+    await ctx.reply("База данных очищена ✅");
   });
 
   bot.catch((err) => {
