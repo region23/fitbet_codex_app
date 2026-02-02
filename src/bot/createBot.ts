@@ -13,6 +13,7 @@ import type { UserFromGetMe } from "grammy/types";
 import type { ApiClientOptions } from "grammy";
 import { onboardingConversation } from "./conversations/onboardingConversation.js";
 import { createTelegramFileStore, type FileStore } from "../services/fileStore.js";
+import { payments } from "../db/schema.js";
 
 type CreateBotDeps = {
   token: string;
@@ -220,6 +221,145 @@ export function createFitbetBot(deps: CreateBotDeps) {
     }
   });
 
+  bot.callbackQuery(/^paid_(\d+)$/, async (ctx) => {
+    if (ctx.chat?.type !== "private") {
+      await ctx.answerCallbackQuery({ text: "Оплата подтверждается в личке с ботом.", show_alert: true });
+      return;
+    }
+    const participantId = Number(ctx.match?.[1]);
+    const from = ctx.from;
+    if (!from) return;
+
+    const participant = deps.db.select().from(participants).where(eq(participants.id, participantId)).get();
+    if (!participant || participant.userId !== from.id) {
+      await ctx.answerCallbackQuery({ text: "Нет доступа.", show_alert: true });
+      return;
+    }
+    if (participant.status !== "pending_payment") {
+      await ctx.answerCallbackQuery({ text: "Оплата уже отмечена или подтверждена.", show_alert: true });
+      return;
+    }
+
+    const challenge = deps.db.select().from(challenges).where(eq(challenges.id, participant.challengeId)).get();
+    if (!challenge) {
+      await ctx.answerCallbackQuery({ text: "Челлендж не найден.", show_alert: true });
+      return;
+    }
+
+    const ts = now();
+    const isBankHolder = challenge.bankHolderId != null && challenge.bankHolderId === participant.userId;
+
+    if (isBankHolder) {
+      deps.db
+        .insert(payments)
+        .values({
+          participantId,
+          status: "confirmed",
+          markedPaidAt: ts,
+          confirmedAt: ts,
+          confirmedBy: participant.userId
+        })
+        .onConflictDoUpdate({
+          target: payments.participantId,
+          set: { status: "confirmed", markedPaidAt: ts, confirmedAt: ts, confirmedBy: participant.userId }
+        })
+        .run();
+      deps.db.update(participants).set({ status: "active" }).where(eq(participants.id, participantId)).run();
+      await ctx.answerCallbackQuery({ text: "Оплата подтверждена (вы Bank Holder)." });
+      await ctx.reply("Оплата подтверждена ✅");
+      await maybeActivateChallenge(deps, ctx.api, challenge.id, ts);
+      return;
+    }
+
+    deps.db
+      .insert(payments)
+      .values({ participantId, status: "marked_paid", markedPaidAt: ts })
+      .onConflictDoUpdate({
+        target: payments.participantId,
+        set: { status: "marked_paid", markedPaidAt: ts }
+      })
+      .run();
+    deps.db.update(participants).set({ status: "payment_marked" }).where(eq(participants.id, participantId)).run();
+
+    await ctx.answerCallbackQuery({ text: "Отлично! Ждём подтверждение от Bank Holder." });
+
+    if (challenge.bankHolderId) {
+      const who = participant.username ? `@${participant.username}` : participant.firstName ?? `id ${participant.userId}`;
+      const kb = new InlineKeyboard().text("✅ Подтвердить оплату", `confirm_${participantId}`);
+      try {
+        await ctx.api.sendMessage(
+          challenge.bankHolderId,
+          `Участник ${who} отметил оплату. Подтвердите, пожалуйста:`,
+          { reply_markup: kb }
+        );
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  bot.callbackQuery(/^confirm_(\d+)$/, async (ctx) => {
+    if (ctx.chat?.type !== "private") {
+      await ctx.answerCallbackQuery({ text: "Подтверждение оплаты доступно только в личке.", show_alert: true });
+      return;
+    }
+    const participantId = Number(ctx.match?.[1]);
+    const from = ctx.from;
+    if (!from) return;
+
+    const participant = deps.db.select().from(participants).where(eq(participants.id, participantId)).get();
+    if (!participant) {
+      await ctx.answerCallbackQuery({ text: "Участник не найден.", show_alert: true });
+      return;
+    }
+    const challenge = deps.db.select().from(challenges).where(eq(challenges.id, participant.challengeId)).get();
+    if (!challenge) {
+      await ctx.answerCallbackQuery({ text: "Челлендж не найден.", show_alert: true });
+      return;
+    }
+    if (!challenge.bankHolderId || challenge.bankHolderId !== from.id) {
+      await ctx.answerCallbackQuery({ text: "Только Bank Holder может подтверждать оплаты.", show_alert: true });
+      return;
+    }
+    if (participant.status !== "payment_marked") {
+      await ctx.answerCallbackQuery({ text: "Оплата ещё не отмечена участником.", show_alert: true });
+      return;
+    }
+
+    const ts = now();
+    deps.db
+      .insert(payments)
+      .values({
+        participantId,
+        status: "confirmed",
+        confirmedAt: ts,
+        confirmedBy: from.id
+      })
+      .onConflictDoUpdate({
+        target: payments.participantId,
+        set: { status: "confirmed", confirmedAt: ts, confirmedBy: from.id }
+      })
+      .run();
+    deps.db.update(participants).set({ status: "active" }).where(eq(participants.id, participantId)).run();
+
+    await ctx.answerCallbackQuery({ text: "Оплата подтверждена." });
+    await ctx.reply("Готово ✅");
+
+    const who = participant.username ? `@${participant.username}` : participant.firstName ?? `id ${participant.userId}`;
+    try {
+      await ctx.api.sendMessage(participant.userId, "Оплата подтверждена ✅");
+    } catch {
+      // ignore
+    }
+    try {
+      await ctx.api.sendMessage(challenge.chatId, `✅ Оплата подтверждена: ${who}`);
+    } catch {
+      // ignore
+    }
+
+    await maybeActivateChallenge(deps, ctx.api, challenge.id, ts);
+  });
+
   bot.command("bankholder", async (ctx) => {
     await ctx.reply("Команда /bankholder будет доступна после реализации голосования.");
   });
@@ -233,4 +373,47 @@ export function createFitbetBot(deps: CreateBotDeps) {
   });
 
   return bot;
+}
+
+async function maybeActivateChallenge(
+  deps: CreateBotDeps,
+  api: BotContext["api"],
+  challengeId: number,
+  ts: number
+) {
+  const challenge = deps.db.select().from(challenges).where(eq(challenges.id, challengeId)).get();
+  if (!challenge) return;
+  if (challenge.status === "active" || challenge.status === "completed") return;
+
+  const blocking = deps.db
+    .select({ c: count() })
+    .from(participants)
+    .where(
+      and(
+        eq(participants.challengeId, challengeId),
+        inArray(participants.status, ["onboarding", "pending_payment", "payment_marked"])
+      )
+    )
+    .get()?.c ?? 0;
+
+  if (blocking > 0) return;
+
+  const startedAt = ts;
+  const endsAt = deps.env.CHALLENGE_DURATION_UNIT === "hours"
+    ? startedAt + challenge.durationMonths * 60 * 60 * 1000
+    : addMonthsMs(startedAt, challenge.durationMonths);
+
+  deps.db
+    .update(challenges)
+    .set({ status: "active", startedAt, endsAt })
+    .where(eq(challenges.id, challengeId))
+    .run();
+
+  await api.sendMessage(challenge.chatId, "✅ Все оплаты подтверждены. Челлендж активирован!");
+}
+
+function addMonthsMs(startMs: number, months: number) {
+  const d = new Date(startMs);
+  d.setMonth(d.getMonth() + months);
+  return d.getTime();
 }
