@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createTestBot } from "./testkit.js";
-import { challenges, participants } from "../db/schema.js";
+import { challenges, goals, participantCommitments, participants, payments } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("onboarding", () => {
@@ -119,6 +119,49 @@ describe("onboarding", () => {
       await sendPhotoUpdate(8, "right_file");
       await sendPhotoUpdate(9, "back_file");
 
+      await bot.handleUpdate({
+        update_id: 10,
+        callback_query: {
+          id: "cb_goal_w",
+          from: { id: 10, is_bot: false, first_name: "U" },
+          chat_instance: "ci_goal",
+          message: {
+            message_id: 10,
+            date: 1,
+            chat: { id: 10, type: "private", first_name: "U" },
+            text: "dummy"
+          },
+          data: "onb_goal_weight_accept"
+        }
+      });
+
+      await bot.handleUpdate({
+        update_id: 11,
+        callback_query: {
+          id: "cb_goal_waist",
+          from: { id: 10, is_bot: false, first_name: "U" },
+          chat_instance: "ci_goal",
+          message: {
+            message_id: 11,
+            date: 1,
+            chat: { id: 10, type: "private", first_name: "U" },
+            text: "dummy"
+          },
+          data: "onb_goal_waist_accept"
+        }
+      });
+
+      await bot.handleUpdate({
+        update_id: 12,
+        message: {
+          message_id: 12,
+          date: 1,
+          chat: { id: 10, type: "private", first_name: "U" },
+          from: { id: 10, is_bot: false, first_name: "U" },
+          text: "1 2"
+        }
+      });
+
       const p = db.select().from(participants).where(eq(participants.id, participantId)).get()!;
       expect(p.track).toBe("cut");
       expect(p.startWeight).toBe(80);
@@ -126,6 +169,21 @@ describe("onboarding", () => {
       expect(p.height).toBe(180);
       expect(p.startPhotoFrontId).toBe("front_file");
       expect(p.startPhotoBackId).toBe("back_file");
+      expect(p.status).toBe("pending_payment");
+
+      const g = db.select().from(goals).where(eq(goals.participantId, participantId)).get();
+      expect(g?.targetWeight).toBeTypeOf("number");
+      expect(g?.targetWaist).toBeTypeOf("number");
+
+      const pay = db.select().from(payments).where(eq(payments.participantId, participantId)).get();
+      expect(pay?.status).toBe("pending");
+
+      const comm = db
+        .select()
+        .from(participantCommitments)
+        .where(eq(participantCommitments.participantId, participantId))
+        .all();
+      expect(comm.length).toBe(2);
 
       expect(savedPhotos.map((s) => s.destinationPath)).toContain(
         `data/photos/${participantId}/start/front.jpg`
@@ -133,9 +191,14 @@ describe("onboarding", () => {
       expect(savedPhotos.map((s) => s.destinationPath)).toContain(
         `data/photos/${participantId}/start/back.jpg`
       );
+
+      const doneMsg = apiCalls
+        .filter((c) => c.method === "sendMessage")
+        .map((c) => (c.payload as any).text)
+        .join("\n");
+      expect(doneMsg).toContain("Онбординг завершён");
     } finally {
       close();
     }
   });
 });
-

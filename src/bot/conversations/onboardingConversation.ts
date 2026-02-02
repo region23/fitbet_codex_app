@@ -4,7 +4,13 @@ import { eq } from "drizzle-orm";
 import { InlineKeyboard, type Context } from "grammy";
 import path from "node:path";
 import { photosDirectory } from "../../constants.js";
-import { goals, participantCommitments, participants } from "../../db/schema.js";
+import {
+  commitmentTemplates,
+  goals,
+  participantCommitments,
+  participants,
+  payments
+} from "../../db/schema.js";
 import type { AppEnv } from "../../config.js";
 import type { BotContext } from "../context.js";
 import type { FileStore } from "../../services/fileStore.js";
@@ -109,6 +115,7 @@ export async function onboardingConversation(
           .delete(participantCommitments)
           .where(eq(participantCommitments.participantId, participantId))
           .run();
+        deps.db.delete(payments).where(eq(payments.participantId, participantId)).run();
       });
       state.track = null;
       state.startWeight = null;
@@ -208,8 +215,59 @@ export async function onboardingConversation(
     "startPhotoBackId"
   );
 
-  // Goal + commitments будут добавлены отдельными задачами (следующие коммиты).
-  await ctx.reply("Отлично! Дальше — постановка цели и обязательства (в следующем шаге).");
+  // 9) Goal
+  const goal = await askGoal(conversation, ctx, state);
+  const now = await conversation.now();
+  await conversation.external(() => {
+    deps.db.delete(goals).where(eq(goals.participantId, participantId)).run();
+    deps.db
+      .insert(goals)
+      .values({
+        participantId,
+        targetWeight: goal.targetWeight,
+        targetWaist: goal.targetWaist,
+        isValidated: !deps.env.OPENROUTER_API_KEY,
+        validationResult: deps.env.OPENROUTER_API_KEY ? null : "realistic",
+        validationFeedback: null,
+        validatedAt: deps.env.OPENROUTER_API_KEY ? null : now,
+        createdAt: now,
+        updatedAt: now
+      })
+      .run();
+  });
+
+  // 10) Commitments
+  const selectedTemplateIds = await askCommitments(conversation, ctx, deps);
+  await conversation.external(() => {
+    deps.db
+      .delete(participantCommitments)
+      .where(eq(participantCommitments.participantId, participantId))
+      .run();
+    deps.db
+      .insert(participantCommitments)
+      .values(selectedTemplateIds.map((templateId) => ({ participantId, templateId, createdAt: now })))
+      .run();
+  });
+
+  // 11) Finish
+  await conversation.external(() => {
+    deps.db
+      .update(participants)
+      .set({ status: "pending_payment", onboardingCompletedAt: now })
+      .where(eq(participants.id, participantId))
+      .run();
+    deps.db
+      .insert(payments)
+      .values({ participantId, status: "pending" })
+      .onConflictDoUpdate({
+        target: payments.participantId,
+        set: { status: "pending", markedPaidAt: null, confirmedAt: null, confirmedBy: null }
+      })
+      .run();
+  });
+
+  const payKb = new InlineKeyboard().text("💳 Я оплатил", `paid_${participantId}`);
+  await ctx.reply("Онбординг завершён! После оплаты нажмите кнопку:", { reply_markup: payKb });
 }
 
 async function askTrack(
@@ -304,4 +362,161 @@ async function askStartPhoto(
       .run();
   });
   state[column] = fileId;
+}
+
+async function askGoal(
+  conversation: Conversation<BotContext, Context>,
+  ctx: Context,
+  state: {
+    track: "cut" | "bulk" | null;
+    startWeight: number | null;
+    startWaist: number | null;
+    height: number | null;
+  }
+): Promise<{ targetWeight: number; targetWaist: number }> {
+  const startWeight = state.startWeight!;
+  const startWaist = state.startWaist!;
+  const heightCm = state.height!;
+
+  const heightM = heightCm / 100;
+  const recommendedWeight = round1(22 * heightM * heightM);
+  const recommendedWaist = round1(0.45 * heightCm);
+
+  const targetWeight = await askGoalNumber(
+    conversation,
+    ctx,
+    `Цель по весу. Рекомендация: *${recommendedWeight} кг*.\nНажмите «Принять» или введите своё значение:`,
+    "onb_goal_weight",
+    recommendedWeight,
+    30,
+    150,
+    (w) => {
+      if (state.track === "cut") return w < startWeight;
+      return w > startWeight;
+    }
+  );
+
+  const targetWaist = await askGoalNumber(
+    conversation,
+    ctx,
+    `Цель по талии. Рекомендация: *${recommendedWaist} см*.\nНажмите «Принять» или введите своё значение:`,
+    "onb_goal_waist",
+    recommendedWaist,
+    40,
+    150,
+    (waist) => {
+      if (state.track === "cut") return waist < startWaist;
+      // Для "Набрать" строгой проверки нет
+      return true;
+    }
+  );
+
+  return { targetWeight, targetWaist };
+}
+
+async function askGoalNumber(
+  conversation: Conversation<BotContext, Context>,
+  ctx: Context,
+  prompt: string,
+  prefix: "onb_goal_weight" | "onb_goal_waist",
+  recommendedValue: number,
+  min: number,
+  max: number,
+  isValid: (n: number) => boolean
+): Promise<number> {
+  const kb = new InlineKeyboard()
+    .text(`✅ Принять ${recommendedValue}`, `${prefix}_accept`)
+    .row()
+    .text("✍️ Ввести своё", `${prefix}_custom`);
+
+  await ctx.reply(prompt, { parse_mode: "Markdown", reply_markup: kb });
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const next = await conversation
+      .waitFor(["callback_query:data", "message:text"])
+      .andFrom(ctx.from!.id);
+
+    if (next.callbackQuery?.data === `${prefix}_accept`) {
+      await next.answerCallbackQuery();
+      if (!isValid(recommendedValue)) {
+        await ctx.reply("Эта цель не подходит для вашего трека. Введите значение вручную.");
+        continue;
+      }
+      return recommendedValue;
+    }
+
+    if (next.callbackQuery?.data === `${prefix}_custom`) {
+      await next.answerCallbackQuery();
+      await ctx.reply("Введите число:");
+      const val = await readNumber(conversation, ctx.from!.id, min, max);
+      if (!isValid(val)) {
+        await ctx.reply("Эта цель не подходит для вашего трека. Попробуйте другое значение.");
+        continue;
+      }
+      return val;
+    }
+
+    if (next.message?.text) {
+      const val = parseFloat(next.message.text.trim().replace(",", "."));
+      if (!Number.isFinite(val)) {
+        await ctx.reply("Введите число.");
+        continue;
+      }
+      if (val < min || val > max) {
+        await ctx.reply(`Введите число в диапазоне ${min}–${max}.`);
+        continue;
+      }
+      if (!isValid(val)) {
+        await ctx.reply("Эта цель не подходит для вашего трека. Попробуйте другое значение.");
+        continue;
+      }
+      return val;
+    }
+  }
+}
+
+async function askCommitments(
+  conversation: Conversation<BotContext, Context>,
+  ctx: Context,
+  deps: Deps
+): Promise<number[]> {
+  const templates = await conversation.external(() =>
+    deps.db
+      .select({
+        id: commitmentTemplates.id,
+        name: commitmentTemplates.name,
+        description: commitmentTemplates.description
+      })
+      .from(commitmentTemplates)
+      .where(eq(commitmentTemplates.isActive, true))
+      .all()
+  );
+
+  const lines = templates.map((t, i) => `${i + 1}) ${t.name} — ${t.description}`);
+  await ctx.reply(
+    `Выберите 2–3 обязательства (номера через пробел или запятую):\n\n${lines.join("\n")}`
+  );
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const msgCtx = await conversation.waitFor("message:text").andFrom(ctx.from!.id);
+    const raw = msgCtx.msg.text.trim();
+    const nums = raw
+      .split(/[\s,]+/)
+      .map((x) => Number(x))
+      .filter((n) => Number.isInteger(n));
+    const unique = Array.from(new Set(nums));
+    const okCount = unique.length === 2 || unique.length === 3;
+    const okRange = unique.every((n) => n >= 1 && n <= templates.length);
+    if (!okCount || !okRange) {
+      await msgCtx.reply("Введите 2 или 3 номера из списка (например: 1 3 5).");
+      continue;
+    }
+    return unique.map((n) => templates[n - 1]!.id);
+  }
+}
+
+function round1(n: number) {
+  return Math.round(n * 10) / 10;
 }
