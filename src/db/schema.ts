@@ -180,6 +180,8 @@ export const commitmentTemplates = sqliteTable(
     name: text("name").notNull(),
     description: text("description").notNull(),
     category: text("category").notNull(), // nutrition|exercise|lifestyle
+    cadence: text("cadence").notNull().default("daily"), // daily|weekly
+    targetPerWeek: integer("target_per_week"),
     isActive: integer("is_active", { mode: "boolean" })
       .notNull()
       .default(true)
@@ -208,6 +210,53 @@ export const participantCommitments = sqliteTable(
       t.templateId
     ),
     participantIdx: index("participant_commitments_participant_id_idx").on(
+      t.participantId
+    )
+  })
+);
+
+export const habitLogs = sqliteTable(
+  "habit_logs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    participantId: integer("participant_id")
+      .notNull()
+      .references(() => participants.id, { onDelete: "cascade" }),
+    templateId: integer("template_id")
+      .notNull()
+      .references(() => commitmentTemplates.id, { onDelete: "restrict" }),
+    dateKey: text("date_key").notNull(), // YYYY-MM-DD (Europe/Moscow)
+    status: text("status").notNull(), // done|skipped
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull()
+  },
+  (t) => ({
+    uniqParticipantTemplateDate: uniqueIndex("habit_logs_uniq").on(
+      t.participantId,
+      t.templateId,
+      t.dateKey
+    ),
+    participantIdx: index("habit_logs_participant_id_idx").on(t.participantId),
+    templateIdx: index("habit_logs_template_id_idx").on(t.templateId),
+    dateIdx: index("habit_logs_date_key_idx").on(t.dateKey)
+  })
+);
+
+export const habitReminderSends = sqliteTable(
+  "habit_reminder_sends",
+  {
+    participantId: integer("participant_id")
+      .notNull()
+      .references(() => participants.id, { onDelete: "cascade" }),
+    dateKey: text("date_key").notNull(),
+    sentAt: integer("sent_at").notNull()
+  },
+  (t) => ({
+    uniqParticipantDate: uniqueIndex("habit_reminder_sends_uniq").on(
+      t.participantId,
+      t.dateKey
+    ),
+    participantIdx: index("habit_reminder_sends_participant_id_idx").on(
       t.participantId
     )
   })

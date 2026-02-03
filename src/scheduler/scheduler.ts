@@ -8,7 +8,8 @@ import {
   finalizeEndedChallenges,
   handleOnboardingTimeouts,
   openCheckinWindows,
-  sendCheckinReminders
+  sendCheckinReminders,
+  sendHabitReminders
 } from "./tasks.js";
 import { captureException } from "../monitoring/sentry.js";
 
@@ -27,6 +28,7 @@ export function startScheduler(deps: Deps) {
       await finalizeOverdueBankHolderElections({ db: deps.db, api: deps.api, now });
       await openCheckinWindows({ db: deps.db, api: deps.api, now });
       await sendCheckinReminders({ db: deps.db, api: deps.api, now });
+      await sendHabitReminders({ db: deps.db, api: deps.api, now });
       await closeCheckinWindows({ db: deps.db, api: deps.api, now });
       await finalizeEndedChallenges({ db: deps.db, api: deps.api, now });
     } catch (e) {

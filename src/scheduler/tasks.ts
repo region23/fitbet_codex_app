@@ -10,11 +10,14 @@ import {
   checkinWindows,
   checkins,
   goals,
+  habitReminderSends,
   payments,
+  participantCommitments,
   participants
 } from "../db/schema.js";
 import { reminderHoursBeforeClose } from "../constants.js";
 import { finalizeBankHolderElection } from "../services/bankholderElection.js";
+import { buildHabitsMessage, getDateKey, getLocalHour, habitReminderHour } from "../services/habits.js";
 
 type Deps = {
   db: BetterSQLite3Database;
@@ -215,6 +218,50 @@ export async function sendCheckinReminders(deps: Deps) {
       .set({ reminderSentAt: ts })
       .where(eq(checkinWindows.id, w.id))
       .run();
+  }
+}
+
+export async function sendHabitReminders(deps: Deps) {
+  const ts = deps.now();
+  if (getLocalHour(ts) !== habitReminderHour) return;
+
+  const dateKey = getDateKey(ts);
+  const rows = deps.db
+    .select({
+      participantId: participantCommitments.participantId,
+      userId: participants.userId
+    })
+    .from(participantCommitments)
+    .innerJoin(participants, eq(participantCommitments.participantId, participants.id))
+    .where(eq(participants.status, "active"))
+    .all();
+
+  const unique = new Map<number, number>();
+  for (const row of rows) {
+    unique.set(row.participantId, row.userId);
+  }
+
+  for (const [participantId, userId] of unique) {
+    const alreadySent = deps.db
+      .select()
+      .from(habitReminderSends)
+      .where(and(eq(habitReminderSends.participantId, participantId), eq(habitReminderSends.dateKey, dateKey)))
+      .get();
+    if (alreadySent) continue;
+
+    const msg = buildHabitsMessage({ db: deps.db, participantId, now: ts });
+    try {
+      await deps.api.sendMessage(userId, msg.text, {
+        parse_mode: "Markdown",
+        reply_markup: msg.keyboard
+      });
+      deps.db
+        .insert(habitReminderSends)
+        .values({ participantId, dateKey, sentAt: ts })
+        .run();
+    } catch {
+      // ignore
+    }
   }
 }
 

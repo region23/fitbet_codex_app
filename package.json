@@ -12,7 +12,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "node scripts/run.mjs node_modules/vitest/vitest.mjs run",
     "test:watch": "node scripts/run.mjs node_modules/vitest/vitest.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "husky"
   },
   "dependencies": {
     "@grammyjs/conversations": "^2.1.0",
@@ -27,6 +28,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.13.1",
+    "husky": "^9.1.7",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^2.1.9"

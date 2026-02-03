@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { seedCommitmentTemplates } from "./seeds.js";
+import { normalizeCommitmentTemplates, seedCommitmentTemplates } from "./seeds.js";
 
 export type AppDb = {
   sqlite: Database.Database;
@@ -20,9 +20,11 @@ export function createAppDb(databaseUrl: string): AppDb {
   const sqlite = new Database(filename);
   sqlite.pragma("foreign_keys = ON");
   applySchema(sqlite);
+  ensureCommitmentTemplateColumns(sqlite);
 
   const db = drizzle(sqlite);
   seedCommitmentTemplates(db);
+  normalizeCommitmentTemplates(db);
 
   return { sqlite, db, close: () => sqlite.close() };
 }
@@ -38,6 +40,19 @@ function sqliteFilenameFromUrl(databaseUrl: string): string {
   }
 
   return databaseUrl;
+}
+
+function ensureCommitmentTemplateColumns(sqlite: Database.Database) {
+  const cols = sqlite
+    .prepare("PRAGMA table_info(commitment_templates);")
+    .all()
+    .map((row: any) => row.name);
+  if (!cols.includes("cadence")) {
+    sqlite.exec("ALTER TABLE commitment_templates ADD COLUMN cadence TEXT NOT NULL DEFAULT 'daily';");
+  }
+  if (!cols.includes("target_per_week")) {
+    sqlite.exec("ALTER TABLE commitment_templates ADD COLUMN target_per_week INTEGER;");
+  }
 }
 
 function applySchema(sqlite: Database.Database) {
@@ -154,6 +169,8 @@ function applySchema(sqlite: Database.Database) {
       name TEXT NOT NULL,
       description TEXT NOT NULL,
       category TEXT NOT NULL,
+      cadence TEXT NOT NULL DEFAULT 'daily',
+      target_per_week INTEGER,
       is_active INTEGER NOT NULL DEFAULT 1,
       UNIQUE(name)
     );
@@ -167,6 +184,28 @@ function applySchema(sqlite: Database.Database) {
       UNIQUE(participant_id, template_id)
     );
     CREATE INDEX IF NOT EXISTS participant_commitments_participant_id_idx ON participant_commitments(participant_id);
+
+    CREATE TABLE IF NOT EXISTS habit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      participant_id INTEGER NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+      template_id INTEGER NOT NULL REFERENCES commitment_templates(id) ON DELETE RESTRICT,
+      date_key TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(participant_id, template_id, date_key)
+    );
+    CREATE INDEX IF NOT EXISTS habit_logs_participant_id_idx ON habit_logs(participant_id);
+    CREATE INDEX IF NOT EXISTS habit_logs_template_id_idx ON habit_logs(template_id);
+    CREATE INDEX IF NOT EXISTS habit_logs_date_key_idx ON habit_logs(date_key);
+
+    CREATE TABLE IF NOT EXISTS habit_reminder_sends (
+      participant_id INTEGER NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+      date_key TEXT NOT NULL,
+      sent_at INTEGER NOT NULL,
+      UNIQUE(participant_id, date_key)
+    );
+    CREATE INDEX IF NOT EXISTS habit_reminder_sends_participant_id_idx ON habit_reminder_sends(participant_id);
 
     CREATE TABLE IF NOT EXISTS payments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

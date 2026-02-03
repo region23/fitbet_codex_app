@@ -12,6 +12,7 @@ import {
   bankHolderVotes,
   challenges,
   goals,
+  habitLogs,
   participantCommitments,
   participants
 } from "../db/schema.js";
@@ -32,6 +33,7 @@ import { captureException } from "../monitoring/sentry.js";
 import { formatChallengeDuration } from "./duration.js";
 import { formatChallengeStatusRu, formatParticipantStatusRu } from "./statusLabels.js";
 import { escapeTelegramMarkdown } from "./telegramMarkdown.js";
+import { buildHabitsMessage, getDateKey } from "../services/habits.js";
 
 type CreateBotDeps = {
   token: string;
@@ -293,6 +295,28 @@ export function createFitbetBot(deps: CreateBotDeps) {
     await ctx.reply(`${header}${bank}\n\n*Участники:*\n${lines.join("\n") || "—"}`, { parse_mode: "Markdown" });
   });
 
+  bot.command("habits", async (ctx) => {
+    if (!ctx.chat) return;
+    if (ctx.chat.type !== "private") {
+      await ctx.reply("Привычки доступны только в личке с ботом.");
+      return;
+    }
+    if (!ctx.from) return;
+
+    const participant = deps.db
+      .select()
+      .from(participants)
+      .where(and(eq(participants.userId, ctx.from.id), eq(participants.status, "active")))
+      .get();
+    if (!participant) {
+      await ctx.reply("Привычки доступны только активным участникам.");
+      return;
+    }
+
+    const msg = buildHabitsMessage({ db: deps.db, participantId: participant.id, now: now() });
+    await ctx.reply(msg.text, { parse_mode: "Markdown", reply_markup: msg.keyboard });
+  });
+
   bot.command("create", async (ctx) => {
     if (!ctx.chat || (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup")) {
       await ctx.reply("Команда /create доступна только в группе.");
@@ -502,6 +526,79 @@ export function createFitbetBot(deps: CreateBotDeps) {
     } catch {
       // ignore
     }
+  });
+
+  bot.callbackQuery(/^habit_(done|skip)_(\d+)_(\d+)_(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
+    if (ctx.chat?.type !== "private") {
+      await ctx.answerCallbackQuery({ text: "Отметки по привычкам доступны в личке.", show_alert: true });
+      return;
+    }
+    const from = ctx.from;
+    if (!from) return;
+
+    const action = ctx.match?.[1] === "done" ? "done" : "skipped";
+    const participantId = Number(ctx.match?.[2]);
+    const templateId = Number(ctx.match?.[3]);
+    const dateKey = String(ctx.match?.[4]);
+
+    const participant = deps.db.select().from(participants).where(eq(participants.id, participantId)).get();
+    if (!participant || participant.userId !== from.id || participant.status !== "active") {
+      await ctx.answerCallbackQuery({ text: "Нет доступа.", show_alert: true });
+      return;
+    }
+
+    const todayKey = getDateKey(now());
+    if (dateKey !== todayKey) {
+      await ctx.answerCallbackQuery({
+        text: "Отмечать можно только за сегодня. Откройте /habits.",
+        show_alert: true
+      });
+      return;
+    }
+
+    const commitment = deps.db
+      .select()
+      .from(participantCommitments)
+      .where(
+        and(
+          eq(participantCommitments.participantId, participantId),
+          eq(participantCommitments.templateId, templateId)
+        )
+      )
+      .get();
+    if (!commitment) {
+      await ctx.answerCallbackQuery({ text: "Привычка не найдена.", show_alert: true });
+      return;
+    }
+
+    const ts = now();
+    deps.db
+      .insert(habitLogs)
+      .values({
+        participantId,
+        templateId,
+        dateKey,
+        status: action,
+        createdAt: ts,
+        updatedAt: ts
+      })
+      .onConflictDoUpdate({
+        target: [habitLogs.participantId, habitLogs.templateId, habitLogs.dateKey],
+        set: { status: action, updatedAt: ts }
+      })
+      .run();
+
+    const msg = buildHabitsMessage({ db: deps.db, participantId, now: ts });
+    try {
+      await ctx.editMessageText(msg.text, {
+        parse_mode: "Markdown",
+        reply_markup: msg.keyboard
+      });
+    } catch {
+      // ignore
+    }
+
+    await ctx.answerCallbackQuery({ text: action === "done" ? "Отмечено." : "Записал как не сделано." });
   });
 
   bot.callbackQuery(/^paid_(\d+)$/, async (ctx) => {
