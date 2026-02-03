@@ -81,5 +81,79 @@ describe("scheduler tasks", () => {
       close();
     }
   });
-});
 
+  it("auto-closes previous open window when a new one opens", async () => {
+    const now = 1_700_000_000_000;
+    const { bot, db, close } = createTestBot({ now: () => now });
+    try {
+      const challengeId = db
+        .insert(challenges)
+        .values({
+          chatId: -100,
+          chatTitle: "Test Chat",
+          creatorId: 1,
+          durationMonths: 6,
+          stakeAmount: 1000,
+          disciplineThreshold: 0.8,
+          maxSkips: 2,
+          status: "active",
+          createdAt: now,
+          startedAt: now,
+          endsAt: now + 6 * 60 * 60 * 1000
+        })
+        .returning({ id: challenges.id })
+        .get().id;
+
+      const participantId = db
+        .insert(participants)
+        .values({
+          challengeId,
+          userId: 10,
+          username: "u1",
+          firstName: "U1",
+          status: "active",
+          joinedAt: now
+        })
+        .returning({ id: participants.id })
+        .get().id;
+
+      const w1Id = db
+        .insert(checkinWindows)
+        .values({
+          challengeId,
+          windowNumber: 1,
+          opensAt: now - 10 * 60 * 1000,
+          closesAt: now + 48 * 60 * 60 * 1000,
+          status: "open"
+        })
+        .returning({ id: checkinWindows.id })
+        .get().id;
+
+      const w2Id = db
+        .insert(checkinWindows)
+        .values({
+          challengeId,
+          windowNumber: 2,
+          opensAt: now - 60_000,
+          closesAt: now + 48 * 60 * 60 * 1000,
+          status: "scheduled"
+        })
+        .returning({ id: checkinWindows.id })
+        .get().id;
+
+      await openCheckinWindows({ db, api: bot.api, now: () => now });
+
+      const w1 = db.select().from(checkinWindows).where(eq(checkinWindows.id, w1Id)).get()!;
+      const w2 = db.select().from(checkinWindows).where(eq(checkinWindows.id, w2Id)).get()!;
+      expect(w1.status).toBe("closed");
+      expect(w2.status).toBe("open");
+
+      const p = db.select().from(participants).where(eq(participants.id, participantId)).get()!;
+      expect(p.totalCheckins).toBe(1);
+      expect(p.skippedCheckins).toBe(1);
+      expect(p.status).toBe("active");
+    } finally {
+      close();
+    }
+  });
+});

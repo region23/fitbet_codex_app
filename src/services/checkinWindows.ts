@@ -14,6 +14,9 @@ export function generateCheckinWindowsForChallenge(opts: {
 
   db.delete(checkinWindows).where(eq(checkinWindows.challengeId, challengeId)).run();
 
+  const periodMs = checkinPeriodMs > 0 ? checkinPeriodMs : checkinWindowMs;
+  const windowDurationMs = Math.min(checkinWindowMs, periodMs);
+
   let windowNumber = 1;
   let opensAt = startedAt + checkinPeriodMs;
   const rows: Array<{
@@ -25,11 +28,12 @@ export function generateCheckinWindowsForChallenge(opts: {
   }> = [];
 
   while (opensAt < endsAt) {
+    const closesAt = Math.min(opensAt + windowDurationMs, endsAt);
     rows.push({
       challengeId,
       windowNumber,
       opensAt,
-      closesAt: opensAt + checkinWindowMs,
+      closesAt,
       status: "scheduled"
     });
     windowNumber += 1;
@@ -39,4 +43,3 @@ export function generateCheckinWindowsForChallenge(opts: {
   if (rows.length > 0) db.insert(checkinWindows).values(rows).run();
   return rows.length;
 }
-

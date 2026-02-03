@@ -17,6 +17,8 @@ type Deps = {
   llm?: OpenRouterClient;
 };
 
+type PhotoKey = "front" | "left" | "right" | "back";
+
 export async function checkinConversation(
   conversation: Conversation<BotContext, Context>,
   ctx: Context,
@@ -78,14 +80,21 @@ export async function checkinConversation(
   await ctx.reply("Введите талию (см), 40–150:");
   const waist = await readNumber(conversation, ctx.from.id, 40, 150);
 
-  const photoIds: Record<"front" | "left" | "right" | "back", string> = {
+  const photoPrompts: Record<PhotoKey, string> = {
+    front: "Фото 1/4 (анфас):",
+    left: "Фото 2/4 (профиль слева):",
+    right: "Фото 3/4 (профиль справа):",
+    back: "Фото 4/4 (со спины):"
+  };
+
+  const photoIds: Record<PhotoKey, string> = {
     front: await askPhoto(
       conversation,
       ctx,
       init.window.windowNumber,
       participantId,
       deps,
-      "Фото 1/4 (анфас):",
+      photoPrompts.front,
       "front"
     ),
     left: await askPhoto(
@@ -94,7 +103,7 @@ export async function checkinConversation(
       init.window.windowNumber,
       participantId,
       deps,
-      "Фото 2/4 (профиль слева):",
+      photoPrompts.left,
       "left"
     ),
     right: await askPhoto(
@@ -103,7 +112,7 @@ export async function checkinConversation(
       init.window.windowNumber,
       participantId,
       deps,
-      "Фото 3/4 (профиль справа):",
+      photoPrompts.right,
       "right"
     ),
     back: await askPhoto(
@@ -112,10 +121,68 @@ export async function checkinConversation(
       init.window.windowNumber,
       participantId,
       deps,
-      "Фото 4/4 (со спины):",
+      photoPrompts.back,
       "back"
     )
   };
+
+  let allowRecommendations = true;
+  if (deps.llm?.validateCheckinPhotos) {
+    const maxAttempts = 2;
+    let valid = false;
+    let attempted = false;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const validation = await conversation.external(async () => {
+          const photosBase64 = await loadCheckinPhotosBase64(
+            participantId,
+            init.window.windowNumber
+          );
+          return deps.llm!.validateCheckinPhotos({ photosBase64Jpeg: photosBase64 });
+        });
+        attempted = true;
+
+        if (validation.isValid) {
+          valid = true;
+          break;
+        }
+
+        const labels: Record<PhotoKey, string> = {
+          front: "анфас",
+          left: "профиль слева",
+          right: "профиль справа",
+          back: "со спины"
+        };
+        const invalidList = validation.invalidPhotos.map((k) => labels[k]).join(", ");
+        await ctx.reply(
+          `На фото не видно человека: ${invalidList}. Пришлите эти фото ещё раз, пожалуйста.`
+        );
+
+        if (attempt === maxAttempts - 1) break;
+
+        for (const key of validation.invalidPhotos) {
+          photoIds[key] = await askPhoto(
+            conversation,
+            ctx,
+            init.window.windowNumber,
+            participantId,
+            deps,
+            photoPrompts[key],
+            key
+          );
+        }
+      } catch {
+        break;
+      }
+    }
+
+    if (attempted && !valid) {
+      allowRecommendations = false;
+      await ctx.reply(
+        "Чек-ин принят, но рекомендации не сформированы — фото распознаны неуверенно. В следующий раз пришлите фото с человеком в полный рост."
+      );
+    }
+  }
 
   const ts = await conversation.now();
   const checkinId = await conversation.external(() => {
@@ -154,7 +221,7 @@ export async function checkinConversation(
 
   await ctx.reply(`Принято ✅\nВес: ${weight}\nТалия: ${waist}`);
 
-  if (deps.llm) {
+  if (deps.llm && allowRecommendations) {
     try {
       const rec = await conversation.external(async () => {
         const p = deps.db.select().from(participants).where(eq(participants.id, participantId)).get();
@@ -173,16 +240,13 @@ export async function checkinConversation(
           .map((c) => `${new Date(c.submittedAt).toLocaleDateString("ru-RU")}: ${c.weight} кг, ${c.waist} см`)
           .join("\n");
 
-        const baseDir = path.join(photosDirectory, String(participantId), `checkin-${init.window!.windowNumber}`);
-        const files = ["front.jpg", "left.jpg", "right.jpg", "back.jpg"].map((f) =>
-          path.join(baseDir, f)
-        );
-        const photosBase64 = await Promise.all(
-          files.map(async (fp) => {
-            const buf = await fs.readFile(fp);
-            return `data:image/jpeg;base64,${buf.toString("base64")}`;
-          })
-        );
+        const photosBase64Map = await loadCheckinPhotosBase64(participantId, init.window!.windowNumber);
+        const photosBase64 = [
+          photosBase64Map.front,
+          photosBase64Map.left,
+          photosBase64Map.right,
+          photosBase64Map.back
+        ];
 
         const analysis = await deps.llm!.analyzeCheckin({
           track: (p.track as any) ?? "cut",
@@ -231,7 +295,7 @@ export async function checkinConversation(
     } catch {
       await ctx.reply("Отличная работа! Продолжайте в том же духе 💪");
     }
-  } else {
+  } else if (!deps.llm) {
     await ctx.reply("Отличная работа! Продолжайте в том же духе 💪");
   }
 }
@@ -250,6 +314,34 @@ async function readNumber(
     if (Number.isFinite(n) && n >= min && n <= max) return n;
     await msgCtx.reply(`Введите число в диапазоне ${min}–${max}.`);
   }
+}
+
+async function loadCheckinPhotosBase64(
+  participantId: number,
+  windowNumber: number
+): Promise<Record<PhotoKey, string>> {
+  const baseDir = path.join(photosDirectory, String(participantId), `checkin-${windowNumber}`);
+  const files: Record<PhotoKey, string> = {
+    front: path.join(baseDir, "front.jpg"),
+    left: path.join(baseDir, "left.jpg"),
+    right: path.join(baseDir, "right.jpg"),
+    back: path.join(baseDir, "back.jpg")
+  };
+
+  const result: Record<PhotoKey, string> = {
+    front: "",
+    left: "",
+    right: "",
+    back: ""
+  };
+
+  const keys: PhotoKey[] = ["front", "left", "right", "back"];
+  for (const key of keys) {
+    const buf = await fs.readFile(files[key]);
+    result[key] = `data:image/jpeg;base64,${buf.toString("base64")}`;
+  }
+
+  return result;
 }
 
 async function askPhoto(

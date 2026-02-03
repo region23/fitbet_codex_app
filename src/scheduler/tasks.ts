@@ -1,10 +1,12 @@
 import type { Api } from "grammy";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, lte, sql } from "drizzle-orm";
 import { InlineKeyboard } from "grammy";
 import {
   bankHolderElections,
   challenges,
+  checkinDmNotifications,
+  checkinGroupNotifications,
   checkinWindows,
   checkins,
   goals,
@@ -26,19 +28,73 @@ export async function openCheckinWindows(deps: Deps) {
     .select()
     .from(checkinWindows)
     .where(and(eq(checkinWindows.status, "scheduled"), lte(checkinWindows.opensAt, ts)))
+    .orderBy(checkinWindows.opensAt)
     .all();
 
   for (const w of due) {
+    const nextWindow = deps.db
+      .select()
+      .from(checkinWindows)
+      .where(and(eq(checkinWindows.challengeId, w.challengeId), gt(checkinWindows.opensAt, w.opensAt)))
+      .orderBy(checkinWindows.opensAt)
+      .get();
+    if (nextWindow && w.closesAt > nextWindow.opensAt) {
+      deps.db
+        .update(checkinWindows)
+        .set({ closesAt: nextWindow.opensAt })
+        .where(eq(checkinWindows.id, w.id))
+        .run();
+      w.closesAt = nextWindow.opensAt;
+    }
+
+    const overlapping = deps.db
+      .select()
+      .from(checkinWindows)
+      .where(
+        and(
+          eq(checkinWindows.challengeId, w.challengeId),
+          eq(checkinWindows.status, "open"),
+          lt(checkinWindows.opensAt, w.opensAt)
+        )
+      )
+      .all();
+    for (const prev of overlapping) {
+      await closeCheckinWindow(deps, prev, { notify: false, closedAtOverride: w.opensAt });
+    }
+
     deps.db.update(checkinWindows).set({ status: "open" }).where(eq(checkinWindows.id, w.id)).run();
     const challenge = deps.db.select().from(challenges).where(eq(challenges.id, w.challengeId)).get();
     if (!challenge) continue;
 
+    const durationLabel = formatWindowDuration(w.closesAt - w.opensAt);
     const kb = new InlineKeyboard().text("📋 Сделать чек-ин", `checkin_${w.id}`);
-    await deps.api.sendMessage(
+    const prevGroup = deps.db
+      .select()
+      .from(checkinGroupNotifications)
+      .where(eq(checkinGroupNotifications.challengeId, w.challengeId))
+      .get();
+    if (prevGroup) {
+      try {
+        await deps.api.deleteMessage(challenge.chatId, prevGroup.messageId);
+      } catch {
+        // ignore
+      }
+    }
+
+    const groupMsg = await deps.api.sendMessage(
       challenge.chatId,
-      `Открыто окно чек-ина #${w.windowNumber} (48 часов).`,
+      `Открыто окно чек-ина #${w.windowNumber} (${durationLabel}).`,
       { reply_markup: kb }
     );
+
+    deps.db
+      .insert(checkinGroupNotifications)
+      .values({ challengeId: w.challengeId, messageId: groupMsg.message_id, windowId: w.id })
+      .onConflictDoUpdate({
+        target: checkinGroupNotifications.challengeId,
+        set: { messageId: groupMsg.message_id, windowId: w.id }
+      })
+      .run();
 
     const active = deps.db
       .select()
@@ -47,14 +103,38 @@ export async function openCheckinWindows(deps: Deps) {
       .all();
     for (const p of active) {
       try {
-        await deps.api.sendMessage(
+        const prev = deps.db
+          .select()
+          .from(checkinDmNotifications)
+          .where(eq(checkinDmNotifications.participantId, p.id))
+          .get();
+        if (prev) {
+          try {
+            await deps.api.deleteMessage(p.userId, prev.messageId);
+          } catch {
+            // ignore
+          }
+        }
+
+        const dmKb = new InlineKeyboard().text("📋 Сдать чек-ин", `checkin_${w.id}`);
+        const dmMsg = await deps.api.sendMessage(
           p.userId,
-          `Открыто окно чек-ина #${w.windowNumber}. Перейдите в группу и нажмите «Сделать чек-ин».`
+          `Открыто окно чек-ина #${w.windowNumber} (${durationLabel}). Нажмите «Сдать чек-ин».`,
+          { reply_markup: dmKb }
         );
+        deps.db
+          .insert(checkinDmNotifications)
+          .values({ participantId: p.id, messageId: dmMsg.message_id, windowId: w.id })
+          .onConflictDoUpdate({
+            target: checkinDmNotifications.participantId,
+            set: { messageId: dmMsg.message_id, windowId: w.id }
+          })
+          .run();
       } catch {
         // ignore
       }
     }
+
   }
 }
 
@@ -74,6 +154,16 @@ export async function sendCheckinReminders(deps: Deps) {
     .all();
 
   for (const w of windows) {
+    const windowDurationMs = w.closesAt - w.opensAt;
+    if (windowDurationMs <= reminderHoursBeforeClose * 60 * 60 * 1000) {
+      deps.db
+        .update(checkinWindows)
+        .set({ reminderSentAt: ts })
+        .where(eq(checkinWindows.id, w.id))
+        .run();
+      continue;
+    }
+
     const challenge = deps.db.select().from(challenges).where(eq(challenges.id, w.challengeId)).get();
     if (!challenge) continue;
 
@@ -137,57 +227,7 @@ export async function closeCheckinWindows(deps: Deps) {
     .all();
 
   for (const w of due) {
-    deps.db.update(checkinWindows).set({ status: "closed" }).where(eq(checkinWindows.id, w.id)).run();
-
-    const challenge = deps.db.select().from(challenges).where(eq(challenges.id, w.challengeId)).get();
-    if (!challenge) continue;
-
-    const active = deps.db
-      .select()
-      .from(participants)
-      .where(and(eq(participants.challengeId, w.challengeId), eq(participants.status, "active")))
-      .all();
-
-    const submitted = new Set(
-      deps.db
-        .select({ pid: checkins.participantId })
-        .from(checkins)
-        .where(eq(checkins.windowId, w.id))
-        .all()
-        .map((r) => r.pid)
-    );
-
-    const ok: string[] = [];
-    const skipped: string[] = [];
-
-    for (const p of active) {
-      const label = p.username ? `@${p.username}` : p.firstName ?? `id ${p.userId}`;
-      if (submitted.has(p.id)) {
-        ok.push(label);
-        continue;
-      }
-      skipped.push(label);
-      const nextSkipped = p.skippedCheckins + 1;
-      const nextTotal = p.totalCheckins + 1;
-      deps.db
-        .update(participants)
-        .set({
-          skippedCheckins: nextSkipped,
-          totalCheckins: nextTotal,
-          pendingCheckinWindowId: null,
-          pendingCheckinRequestedAt: null,
-          status: nextSkipped > challenge.maxSkips ? "disqualified" : "active"
-        })
-        .where(eq(participants.id, p.id))
-        .run();
-    }
-
-    await deps.api.sendMessage(
-      challenge.chatId,
-      `Окно чек-ина #${w.windowNumber} закрыто.\nСдали: ${ok.length ? ok.join(", ") : "—"}\nПропустили: ${
-        skipped.length ? skipped.join(", ") : "—"
-      }`
-    );
+    await closeCheckinWindow(deps, w, { notify: true });
   }
 }
 
@@ -256,6 +296,15 @@ export async function finalizeEndedChallenges(deps: Deps) {
     .all();
 
   for (const ch of ended) {
+    const openWindows = deps.db
+      .select()
+      .from(checkinWindows)
+      .where(and(eq(checkinWindows.challengeId, ch.id), eq(checkinWindows.status, "open")))
+      .all();
+    for (const w of openWindows) {
+      await closeCheckinWindow(deps, w, { notify: false, closedAtOverride: ts });
+    }
+
     const paid = deps.db
       .select({
         participantId: participants.id,
@@ -373,6 +422,81 @@ export async function finalizeEndedChallenges(deps: Deps) {
       .where(and(eq(participants.challengeId, ch.id), eq(participants.status, "active")))
       .run();
   }
+}
+
+async function closeCheckinWindow(
+  deps: Deps,
+  w: typeof checkinWindows.$inferSelect,
+  opts: { notify: boolean; closedAtOverride?: number }
+) {
+  const closedAt =
+    typeof opts.closedAtOverride === "number" ? Math.min(w.closesAt, opts.closedAtOverride) : w.closesAt;
+  deps.db
+    .update(checkinWindows)
+    .set({ status: "closed", closesAt: closedAt })
+    .where(eq(checkinWindows.id, w.id))
+    .run();
+
+  const challenge = deps.db.select().from(challenges).where(eq(challenges.id, w.challengeId)).get();
+  if (!challenge) return;
+
+  const active = deps.db
+    .select()
+    .from(participants)
+    .where(and(eq(participants.challengeId, w.challengeId), eq(participants.status, "active")))
+    .all();
+
+  const submitted = new Set(
+    deps.db
+      .select({ pid: checkins.participantId })
+      .from(checkins)
+      .where(eq(checkins.windowId, w.id))
+      .all()
+      .map((r) => r.pid)
+  );
+
+  const ok: string[] = [];
+  const skipped: string[] = [];
+
+  for (const p of active) {
+    const label = p.username ? `@${p.username}` : p.firstName ?? `id ${p.userId}`;
+    if (submitted.has(p.id)) {
+      ok.push(label);
+      continue;
+    }
+    skipped.push(label);
+    const nextSkipped = p.skippedCheckins + 1;
+    const nextTotal = p.totalCheckins + 1;
+    deps.db
+      .update(participants)
+      .set({
+        skippedCheckins: nextSkipped,
+        totalCheckins: nextTotal,
+        pendingCheckinWindowId: null,
+        pendingCheckinRequestedAt: null,
+        status: nextSkipped > challenge.maxSkips ? "disqualified" : "active"
+      })
+      .where(eq(participants.id, p.id))
+      .run();
+  }
+
+  if (!opts.notify) return;
+
+  await deps.api.sendMessage(
+    challenge.chatId,
+    `Окно чек-ина #${w.windowNumber} закрыто.\nСдали: ${ok.length ? ok.join(", ") : "—"}\nПропустили: ${
+      skipped.length ? skipped.join(", ") : "—"
+    }`
+  );
+}
+
+function formatWindowDuration(ms: number) {
+  const totalMinutes = Math.max(1, Math.round(ms / 60_000));
+  if (totalMinutes < 60) return `${totalMinutes} мин.`;
+  const totalHours = Math.round(totalMinutes / 60);
+  if (totalHours <= 48) return `${totalHours} ч.`;
+  const totalDays = Math.round(totalHours / 24);
+  return `${totalDays} дн.`;
 }
 
 function computeGoalAchievement(opts: {

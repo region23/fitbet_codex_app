@@ -153,6 +153,26 @@ export const checkins = sqliteTable(
   })
 );
 
+export const checkinGroupNotifications = sqliteTable("checkin_group_notifications", {
+  challengeId: integer("challenge_id")
+    .primaryKey()
+    .references(() => challenges.id, { onDelete: "cascade" }),
+  messageId: integer("message_id").notNull(),
+  windowId: integer("window_id")
+    .notNull()
+    .references(() => checkinWindows.id, { onDelete: "cascade" })
+});
+
+export const checkinDmNotifications = sqliteTable("checkin_dm_notifications", {
+  participantId: integer("participant_id")
+    .primaryKey()
+    .references(() => participants.id, { onDelete: "cascade" }),
+  messageId: integer("message_id").notNull(),
+  windowId: integer("window_id")
+    .notNull()
+    .references(() => checkinWindows.id, { onDelete: "cascade" })
+});
+
 export const commitmentTemplates = sqliteTable(
   "commitment_templates",
   {
@@ -279,4 +299,3 @@ export const checkinRecommendations = sqliteTable(
     )
   })
 );
-

@@ -137,6 +137,18 @@ function applySchema(sqlite: Database.Database) {
     CREATE INDEX IF NOT EXISTS checkins_participant_id_idx ON checkins(participant_id);
     CREATE INDEX IF NOT EXISTS checkins_window_id_idx ON checkins(window_id);
 
+    CREATE TABLE IF NOT EXISTS checkin_group_notifications (
+      challenge_id INTEGER PRIMARY KEY REFERENCES challenges(id) ON DELETE CASCADE,
+      message_id INTEGER NOT NULL,
+      window_id INTEGER NOT NULL REFERENCES checkin_windows(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS checkin_dm_notifications (
+      participant_id INTEGER PRIMARY KEY REFERENCES participants(id) ON DELETE CASCADE,
+      message_id INTEGER NOT NULL,
+      window_id INTEGER NOT NULL REFERENCES checkin_windows(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS commitment_templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,

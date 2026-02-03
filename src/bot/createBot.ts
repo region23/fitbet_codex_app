@@ -15,7 +15,7 @@ import {
   participantCommitments,
   participants
 } from "../db/schema.js";
-import { and, count, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray } from "drizzle-orm";
 import type { UserFromGetMe } from "grammy/types";
 import type { ApiClientOptions } from "grammy";
 import { onboardingConversation } from "./conversations/onboardingConversation.js";
@@ -24,7 +24,7 @@ import { payments } from "../db/schema.js";
 import { checkinWindowHours } from "../constants.js";
 import { generateCheckinWindowsForChallenge } from "../services/checkinWindows.js";
 import { checkinConversation } from "./conversations/checkinConversation.js";
-import { checkinWindows } from "../db/schema.js";
+import { checkins, checkinWindows } from "../db/schema.js";
 import { seedCommitmentTemplates } from "../db/seeds.js";
 import { finalizeBankHolderElection } from "../services/bankholderElection.js";
 import { createOpenRouterClient, type OpenRouterClient } from "../services/openRouter.js";
@@ -132,6 +132,33 @@ export function createFitbetBot(deps: CreateBotDeps) {
         if (win && win.status === "open") {
           await ctx.conversation.enter("checkin", pending.id, win.id);
           return;
+        }
+      }
+
+      const activeForCheckin = deps.db
+        .select()
+        .from(participants)
+        .where(and(eq(participants.userId, ctx.from!.id), eq(participants.status, "active")))
+        .get();
+      if (activeForCheckin) {
+        const openWindow = deps.db
+          .select()
+          .from(checkinWindows)
+          .where(
+            and(eq(checkinWindows.challengeId, activeForCheckin.challengeId), eq(checkinWindows.status, "open"))
+          )
+          .orderBy(desc(checkinWindows.opensAt))
+          .get();
+        if (openWindow) {
+          const existing = deps.db
+            .select()
+            .from(checkins)
+            .where(and(eq(checkins.participantId, activeForCheckin.id), eq(checkins.windowId, openWindow.id)))
+            .get();
+          if (!existing) {
+            await ctx.conversation.enter("checkin", activeForCheckin.id, openWindow.id);
+            return;
+          }
         }
       }
 
@@ -429,6 +456,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
     const from = ctx.from;
     const chat = ctx.chat;
     if (!from || !chat) return;
+    const isPrivate = chat.type === "private";
 
     const window = deps.db.select().from(checkinWindows).where(eq(checkinWindows.id, windowId)).get();
     if (!window || window.status !== "open") {
@@ -436,7 +464,7 @@ export function createFitbetBot(deps: CreateBotDeps) {
       return;
     }
     const challenge = deps.db.select().from(challenges).where(eq(challenges.id, window.challengeId)).get();
-    if (!challenge || challenge.chatId !== chat.id) {
+    if (!challenge || (!isPrivate && challenge.chatId !== chat.id)) {
       await ctx.answerCallbackQuery({ text: "Неверный чат.", show_alert: true });
       return;
     }
@@ -457,9 +485,20 @@ export function createFitbetBot(deps: CreateBotDeps) {
       .where(eq(participants.id, participant.id))
       .run();
 
-    await ctx.answerCallbackQuery({ text: "Отлично! Перейдите в личку и напишите /start." });
+    if (isPrivate) {
+      await ctx.answerCallbackQuery({ text: "Начинаем чек-ин." });
+      await ctx.conversation.enter("checkin", participant.id, windowId);
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: "Отлично! Перейдите в личку." });
     try {
-      await ctx.api.sendMessage(from.id, "Чтобы сдать чек-ин, напишите /start.");
+      const dmKb = new InlineKeyboard().text("📋 Сдать чек-ин", `checkin_${windowId}`);
+      await ctx.api.sendMessage(
+        from.id,
+        "Чтобы сдать чек-ин, нажмите кнопку ниже или напишите /start.",
+        { reply_markup: dmKb }
+      );
     } catch {
       // ignore
     }
@@ -829,6 +868,8 @@ export function createFitbetBot(deps: CreateBotDeps) {
       DELETE FROM bank_holder_elections;
       DELETE FROM payments;
       DELETE FROM participant_commitments;
+      DELETE FROM checkin_dm_notifications;
+      DELETE FROM checkin_group_notifications;
       DELETE FROM checkins;
       DELETE FROM checkin_windows;
       DELETE FROM goals;
