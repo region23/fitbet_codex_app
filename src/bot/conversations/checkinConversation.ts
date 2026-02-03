@@ -74,7 +74,9 @@ export async function checkinConversation(
     return;
   }
 
-  await ctx.reply(`Чек-ин #${init.window.windowNumber}. Введите вес (кг), 30–150:`);
+  const window = init.window;
+
+  await ctx.reply(`Чек-ин #${window.windowNumber}. Введите вес (кг), 30–150:`);
   const weight = await readNumber(conversation, ctx.from.id, 30, 150);
 
   await ctx.reply("Введите талию (см), 40–150:");
@@ -91,7 +93,7 @@ export async function checkinConversation(
     front: await askPhoto(
       conversation,
       ctx,
-      init.window.windowNumber,
+      window.windowNumber,
       participantId,
       deps,
       photoPrompts.front,
@@ -100,7 +102,7 @@ export async function checkinConversation(
     left: await askPhoto(
       conversation,
       ctx,
-      init.window.windowNumber,
+      window.windowNumber,
       participantId,
       deps,
       photoPrompts.left,
@@ -109,7 +111,7 @@ export async function checkinConversation(
     right: await askPhoto(
       conversation,
       ctx,
-      init.window.windowNumber,
+      window.windowNumber,
       participantId,
       deps,
       photoPrompts.right,
@@ -118,7 +120,7 @@ export async function checkinConversation(
     back: await askPhoto(
       conversation,
       ctx,
-      init.window.windowNumber,
+      window.windowNumber,
       participantId,
       deps,
       photoPrompts.back,
@@ -136,7 +138,7 @@ export async function checkinConversation(
         const validation = await conversation.external(async () => {
           const photosBase64 = await loadCheckinPhotosBase64(
             participantId,
-            init.window.windowNumber
+            window.windowNumber
           );
           return deps.llm!.validateCheckinPhotos({ photosBase64Jpeg: photosBase64 });
         });
